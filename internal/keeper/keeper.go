@@ -48,14 +48,15 @@ const deviceLookupQueue = 256
 // than any real bridge has rooms.
 const recallQueue = 256
 
-// recallBackoff is the delay before each retry of a refused recall; its length
-// is the attempt limit. A recall the bridge rejected for a transient reason is
+// recallBackoff is the delay before each retry of a refused recall. Its length
+// is the number of retries, so the total number of attempts is one more than
+// that: every element is used, and adding one adds an attempt. A recall the bridge rejected for a transient reason is
 // worth repeating, because the alternative is a room left in whatever state
 // something else put it in until one of its lights is next switched on by hand.
 //
 // The delays are fixed rather than jittered: the client's rate limiter already
 // spaces retries out, so a house-wide wave of them queues rather than collides.
-var recallBackoff = []time.Duration{time.Second, 3 * time.Second, 9 * time.Second}
+var recallBackoff = []time.Duration{time.Second, 3 * time.Second}
 
 type triggerKind int
 
@@ -1033,6 +1034,12 @@ func (k *Keeper) finish(pending map[string]*pendingRecall, res outcome) bool {
 		return false
 	}
 
+	// Unconditionally, including on a timeout, where the bridge may in fact
+	// have applied the recall. Keeping the window armed there would be the
+	// safer-looking choice, but the floor it also keeps armed blocks this
+	// recall's own retry, so a wedged bridge would cost the room its recovery
+	// as well as its recall. The echo such a recall produces is covered by the
+	// cooldown, which is shorter than the request timeout that got us here.
 	k.rollback(p)
 
 	attempts := p.attempt + 1
@@ -1043,7 +1050,7 @@ func (k *Keeper) finish(pending map[string]*pendingRecall, res outcome) bool {
 		k.log.Error("recall failed", "group", p.groupName, "scene", p.sceneName,
 			"attempts", attempts, "err", res.err)
 		return false
-	case attempts >= len(recallBackoff):
+	case attempts > len(recallBackoff):
 		k.log.Error("recall failed, giving up", "group", p.groupName,
 			"scene", p.sceneName, "attempts", attempts, "err", res.err)
 		return false

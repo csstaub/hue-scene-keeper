@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -37,6 +38,11 @@ const DefaultRequestsPerSecond = 4
 // would show up as the bridge refusing requests rather than as extra speed.
 const MaxRequestsPerSecond = 20
 
+// MaxRecallInterval is the longest either recall timer may be set to. It is a
+// sanity ceiling, not a tuning limit: anything approaching it means the value
+// was meant as milliseconds.
+const MaxRecallInterval = time.Hour
+
 // Duration is a time.Duration that accepts "5s"-style YAML strings.
 type Duration time.Duration
 
@@ -50,7 +56,17 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 		if err := node.Decode(&secs); err != nil {
 			return fmt.Errorf("invalid duration at line %d: %w", node.Line, err)
 		}
-		*d = Duration(time.Duration(secs * float64(time.Second)))
+		// Range-check before the conversion. Converting an out-of-range float
+		// to time.Duration is implementation-defined: 1e300 saturates on
+		// arm64 but wraps to the negative minimum on amd64, where a later
+		// floor clamp would quietly turn it into the smallest legal value. The
+		// same config would then mean two different things on two release
+		// targets.
+		ns := secs * float64(time.Second)
+		if math.IsNaN(ns) || math.IsInf(ns, 0) || ns > math.MaxInt64 || ns < math.MinInt64 {
+			return fmt.Errorf("duration %g seconds at line %d is out of range", secs, node.Line)
+		}
+		*d = Duration(time.Duration(ns))
 		return nil
 	default:
 		var s string
@@ -192,7 +208,10 @@ func (c *Config) applyDefaults() {
 	if c.MinRecallInterval.Duration() < MinRecallFloor {
 		c.MinRecallInterval = Duration(MinRecallFloor)
 	}
-	if c.Bridge.RequestsPerSecond <= 0 {
+	// NaN satisfies neither this nor the ceiling in validate, so without the
+	// explicit test it survives untouched and the derived limiter interval
+	// comes out zero or negative - no rate limiting at all.
+	if math.IsNaN(c.Bridge.RequestsPerSecond) || c.Bridge.RequestsPerSecond <= 0 {
 		c.Bridge.RequestsPerSecond = DefaultRequestsPerSecond
 	}
 	if c.Bridge.RequestTimeout <= 0 {
@@ -207,6 +226,18 @@ func (c *Config) validate() error {
 	if c.CoalesceMax.Duration() > 30*time.Second {
 		return fmt.Errorf("coalesce_max %s is too long; a room would sit unrecalled that whole time",
 			c.CoalesceMax.Duration())
+	}
+	// Ceilings, because a bare number means seconds: someone thinking in
+	// milliseconds who writes `min_recall_interval: 600` gets ten minutes, and
+	// every room silently stops being recalled more than once in that time.
+	// Every other tuning knob is range-checked; these two only had a floor.
+	if c.MinRecallInterval.Duration() > MaxRecallInterval {
+		return fmt.Errorf("min_recall_interval %s is longer than the %s maximum; note a bare number means seconds",
+			c.MinRecallInterval.Duration(), MaxRecallInterval)
+	}
+	if c.RecallCooldown.Duration() > MaxRecallInterval {
+		return fmt.Errorf("recall_cooldown %s is longer than the %s maximum; note a bare number means seconds",
+			c.RecallCooldown.Duration(), MaxRecallInterval)
 	}
 	if c.Bridge.RequestsPerSecond > MaxRequestsPerSecond {
 		return fmt.Errorf("bridge.requests_per_second %g is above the %d the bridge can be expected to take",

@@ -147,7 +147,10 @@ func run() error {
 		args = sub.Args()
 	}
 
-	log := newLogger(g.logFormat, g.logLevel)
+	log, err := newLogger(g.logFormat, g.logLevel)
+	if err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -183,21 +186,29 @@ func run() error {
 	}
 }
 
-func newLogger(format, level string) *slog.Logger {
+// newLogger builds the logger, rejecting a level or format it does not know.
+//
+// Falling back silently means `--log-level=verbose` runs at info and the user
+// spends the next hour wondering where their debug output went. Every other
+// typo in this CLI is an error; these were the exception.
+func newLogger(format, level string) (*slog.Logger, error) {
 	var lvl slog.Level
 	if err := lvl.UnmarshalText([]byte(level)); err != nil {
-		lvl = slog.LevelInfo
+		return nil, fmt.Errorf("--log-level %q: want debug, info, warn or error", level)
 	}
 	opts := &slog.HandlerOptions{Level: lvl}
 	var handler slog.Handler
-	if strings.EqualFold(format, "json") {
+	switch {
+	case strings.EqualFold(format, "json"):
 		handler = slog.NewJSONHandler(os.Stderr, opts)
-	} else {
+	case strings.EqualFold(format, "text"):
 		handler = slog.NewTextHandler(os.Stderr, opts)
+	default:
+		return nil, fmt.Errorf("--log-format %q: want text or json", format)
 	}
 	log := slog.New(handler)
 	slog.SetDefault(log)
-	return log
+	return log, nil
 }
 
 // resolveAddress picks the bridge address from, in order: the flag, the config
@@ -331,6 +342,13 @@ func cmdAuth(ctx context.Context, g globals, log *slog.Logger) error {
 		return fmt.Errorf("cannot reach a bridge at %s: %w", addr, err)
 	}
 
+	// Before the link button is pressed, not after. The bridge issues the
+	// application key once; discovering then that we cannot store it means the
+	// key is lost and the user has to start over.
+	if err := creds.EnsureWritable(); err != nil {
+		return fmt.Errorf("cannot write credentials to %s: %w", g.statePath, err)
+	}
+
 	// Pair with no application key; a successful handshake also learns the pin.
 	if g.resetPin {
 		fmt.Println("Forgetting the previously pinned bridge certificate.")
@@ -362,6 +380,11 @@ func cmdAuth(ctx context.Context, g globals, log *slog.Logger) error {
 		creds.CertPin = pin.Value()
 	}
 	if err := creds.Save(); err != nil {
+		// The key exists only here now. Printing it is the difference between
+		// a fixable problem and pressing the link button again.
+		fmt.Fprintf(os.Stderr,
+			"\nPaired, but the credentials could not be saved to %s.\nApplication key: %s\nStore it there by hand as {\"app_key\": \"...\"} to avoid re-pairing.\n",
+			creds.Path(), key)
 		return err
 	}
 	fmt.Printf("Paired. Credentials written to %s\n", creds.Path())

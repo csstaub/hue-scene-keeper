@@ -537,3 +537,35 @@ func TestResolveOverridesReportsOneKeyMatchingSeveralGroups(t *testing.T) {
 		t.Errorf("the problem should name the key, got %q", ex.OverrideProblems[0])
 	}
 }
+
+// TestLoadRejectsAbsurdRecallTimers: a bare number means seconds, so someone
+// thinking in milliseconds gets ten minutes from `min_recall_interval: 600`
+// and a daemon that looks broken. Every other knob is range-checked; these two
+// only had a floor.
+func TestLoadRejectsAbsurdRecallTimers(t *testing.T) {
+	for _, body := range []string{
+		"min_recall_interval: 6000\n", // meant as milliseconds
+		"recall_cooldown: 7200\n",
+		"min_recall_interval: 2h\n",
+		// Out of range: converting this to a Duration saturates on arm64 but
+		// wraps negative on amd64, so the same config meant two things.
+		"min_recall_interval: 1e300\n",
+	} {
+		if _, err := Load(writeConfig(t, body)); err == nil {
+			t.Errorf("expected a range error for %q", body)
+		}
+	}
+}
+
+// TestNaNRequestsPerSecondFallsBackToTheDefault: NaN satisfies neither the
+// <= 0 check nor the ceiling, so without an explicit test it survived both and
+// the derived limiter interval came out zero - no rate limiting at all.
+func TestNaNRequestsPerSecondFallsBackToTheDefault(t *testing.T) {
+	cfg, err := Load(writeConfig(t, "bridge:\n  requests_per_second: .nan\n"))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := cfg.Bridge.RequestsPerSecond; got != DefaultRequestsPerSecond {
+		t.Fatalf("want the default %g, got %g", float64(DefaultRequestsPerSecond), got)
+	}
+}

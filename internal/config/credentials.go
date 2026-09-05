@@ -34,10 +34,35 @@ func LoadCredentials(path string) (*Credentials, error) {
 		return nil, err
 	}
 	if err := json.Unmarshal(raw, creds); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
+		return nil, fmt.Errorf("parse %s: %w; delete the file and re-run `hue-scene-keeper auth` to pair again", path, err)
 	}
 	creds.path = path
 	return creds, nil
+}
+
+// EnsureWritable checks the credentials path can actually be written, without
+// writing anything to it.
+//
+// Pairing asks the user to press the link button and the bridge then issues an
+// application key exactly once. If storing it fails at that point the key
+// exists nowhere, the user has to press the button again, and the bridge is
+// left carrying an orphan whitelist entry - so the check belongs before the
+// prompt, not after the key is in hand.
+func (c *Credentials) EnsureWritable() error {
+	if c.path == "" {
+		return errors.New("credentials have no path")
+	}
+	dir := filepath.Dir(c.path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(dir, ".probe-*")
+	if err != nil {
+		return err
+	}
+	name := f.Name()
+	_ = f.Close()
+	return os.Remove(name)
 }
 
 // Save writes the credentials atomically at mode 0600.
@@ -53,8 +78,14 @@ func (c *Credentials) Save() error {
 		return errors.New("credentials have no path")
 	}
 	if c.AppKey == "" {
-		// Refuse to write a blank key over a working one.
-		if existing, err := LoadCredentials(c.path); err == nil && existing.AppKey != "" {
+		// Refuse to write a blank key over a working one. A read error is not
+		// permission to proceed: a file we cannot parse or open may well hold
+		// the only copy of a working key, so the interlock has to fail closed.
+		existing, err := LoadCredentials(c.path)
+		switch {
+		case err != nil && !os.IsNotExist(err):
+			return fmt.Errorf("refusing to overwrite %s with an empty application key: cannot read it first: %w", c.path, err)
+		case err == nil && existing.AppKey != "":
 			return errors.New("refusing to overwrite existing credentials with an empty application key")
 		}
 	}

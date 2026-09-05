@@ -919,12 +919,12 @@ func TestRetriesAreBoundedAndReleaseTheRoom(t *testing.T) {
 
 	b.SwitchLight(lights[0], true)
 	waitFor(t, 20*time.Second, "the retries to be exhausted", func() bool {
-		return b.Attempts() >= len(recallBackoff)
+		return b.Attempts() >= len(recallBackoff)+1
 	})
 	settle()
 
-	if got := b.Attempts(); got != len(recallBackoff) {
-		t.Fatalf("expected exactly %d attempts, got %d", len(recallBackoff), got)
+	if got := b.Attempts(); got != len(recallBackoff)+1 {
+		t.Fatalf("expected exactly %d attempts, got %d", len(recallBackoff)+1, got)
 	}
 
 	// The bridge recovers. A fresh trigger must work, which it cannot if the
@@ -954,7 +954,7 @@ func TestWedgedRecallTimesOutRatherThanHangingForever(t *testing.T) {
 	// Each attempt is abandoned after the timeout and retried, so the bridge
 	// sees the full set. Without the deadline the first would never return.
 	waitFor(t, 20*time.Second, "the wedged recall to time out and retry", func() bool {
-		return b.Attempts() >= len(recallBackoff)
+		return b.Attempts() >= len(recallBackoff)+1
 	})
 	if got := b.Recalls(); len(got) != 0 {
 		t.Fatalf("no attempt was ever answered, so none should be recorded: %v", got)
