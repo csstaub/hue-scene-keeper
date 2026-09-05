@@ -535,11 +535,89 @@ func cmdRun(ctx context.Context, g globals, log *slog.Logger) error {
 		"recall_cooldown", cfg.RecallCooldown.Duration(),
 		"min_recall_interval", cfg.MinRecallInterval.Duration())
 
-	k := keeper.New(client, reg, cfg, log, g.dryRun)
-	err = k.Run(ctx)
-	if errors.Is(err, context.Canceled) {
-		log.Info("shutting down")
+	// An address the user pinned by hand is never overridden by discovery:
+	// they know where the bridge is, and quietly wandering off to a different
+	// one would be worse than saying it is unreachable.
+	pinnedByHand := g.address != "" || cfgAddress(cfg) != ""
+
+	for {
+		k := keeper.New(client, reg, cfg, log, g.dryRun)
+		err = k.Run(ctx)
+		switch {
+		case errors.Is(err, context.Canceled):
+			log.Info("shutting down")
+			return nil
+		case !errors.Is(err, hue.ErrStreamUnreachable):
+			// Either a clean stop or something retrying cannot fix - a revoked
+			// application key, a certificate that no longer matches the pin.
+			// Fail loudly so the service manager reports it.
+			return err
+		}
+
+		// The bridge stopped answering where we were looking. Most often its
+		// DHCP lease moved, which no amount of retrying the old address fixes
+		// - and the address is read back from the credentials file, so a
+		// restart would not fix it either.
+		log.Warn("bridge unreachable", "bridge", addr, "err", err)
+		if !pinnedByHand {
+			if found, ok := rediscoverAddress(ctx, creds, log); ok && found != addr {
+				addr = found
+				creds.Address = found
+				if err := creds.Save(); err != nil {
+					log.Warn("could not persist the new bridge address", "err", err)
+				}
+			}
+		}
+
+		if err := sleepCtx(ctx, bridgeRetryPause); err != nil {
+			log.Info("shutting down")
+			return nil
+		}
+		// A fresh registry: whatever we cached is now of unknown age, and
+		// onConnect's reconnect diff would read it as the state we last saw.
+		client = newClient(cfg, creds, addr)
+		reg = registry.New()
+		log.Info("reconnecting to bridge", "bridge", addr)
+	}
+}
+
+// bridgeRetryPause spaces out supervisor cycles. The stream has already spent
+// its own backoff budget before giving up, so this only stops a bridge that is
+// simply switched off from turning into a discovery loop.
+const bridgeRetryPause = 30 * time.Second
+
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
 		return nil
 	}
-	return err
+}
+
+// rediscoverAddress looks for the bridge we are paired with, by id. It reports
+// false if discovery found nothing matching, in which case the caller keeps
+// the address it has - a bridge that is merely rebooting will answer there
+// again shortly.
+func rediscoverAddress(ctx context.Context, creds *config.Credentials, log *slog.Logger) (string, bool) {
+	if creds == nil || creds.BridgeID == "" {
+		return "", false
+	}
+	bridges, err := hue.Discover(ctx, 3*time.Second)
+	if err != nil {
+		log.Warn("rediscovery failed", "err", err)
+		return "", false
+	}
+	for _, b := range bridges {
+		if strings.EqualFold(b.ID, creds.BridgeID) {
+			log.Info("found the paired bridge at a new address",
+				"address", b.Address, "id", b.ID, "via", b.Source)
+			return b.Address, true
+		}
+	}
+	log.Warn("paired bridge not found by discovery",
+		"id", creds.BridgeID, "saw", describeBridges(bridges))
+	return "", false
 }

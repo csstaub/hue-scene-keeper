@@ -83,6 +83,13 @@ func Retryable(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
+	// A pin mismatch is the one thing pinning exists to detect, and it never
+	// resolves itself: either the bridge was replaced and the user must
+	// re-pair, or something is impersonating it. Retrying buries that in a
+	// stream of retry warnings instead of surfacing it.
+	if errors.Is(err, ErrPinMismatch) {
+		return false
+	}
 	var se *StatusError
 	if errors.As(err, &se) {
 		return se.Retryable()
@@ -253,8 +260,16 @@ func New(o Options) *Client {
 		tlsCfg.VerifyPeerCertificate = pin.verify
 	}
 	transport := &http.Transport{
-		TLSClientConfig:     tlsCfg,
-		ForceAttemptHTTP2:   true,
+		TLSClientConfig: tlsCfg,
+		// HTTP/1.1 only, deliberately. The event stream's watchdog recovers a
+		// wedged bridge by cancelling the request context; under HTTP/2 that
+		// only sends RST_STREAM for one stream and leaves the TCP connection
+		// in the pool, so the "reconnect" opens a fresh stream on the same
+		// dead connection and the daemon never recovers. Under HTTP/1.1
+		// cancelling closes the connection, which is what the watchdog means.
+		// The bridge is a LAN device we hold one stream and a trickle of
+		// requests against, so multiplexing buys nothing here.
+		ForceAttemptHTTP2:   false,
 		MaxIdleConns:        4,
 		IdleConnTimeout:     90 * time.Second,
 		TLSHandshakeTimeout: 10 * time.Second,

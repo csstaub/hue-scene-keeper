@@ -205,8 +205,18 @@ func New(client *hue.Client, reg *registry.Registry, cfg *config.Config, log *sl
 	}
 }
 
+// streamGiveUp is how many consecutive stream failures end Run with
+// hue.ErrStreamUnreachable instead of retrying forever.
+//
+// With the stream's linear backoff that is a little over two minutes of
+// trying, comfortably longer than a bridge reboot, and short enough that a
+// bridge which moved to a new DHCP lease is rediscovered rather than waited on
+// for the rest of the daemon's life.
+const streamGiveUp = 12
+
 // Run syncs the registry, then consumes the event stream until ctx is
-// cancelled. It returns ctx.Err() on shutdown.
+// cancelled. It returns ctx.Err() on shutdown, or hue.ErrStreamUnreachable if
+// the bridge stopped answering at the address it was given.
 func (k *Keeper) Run(ctx context.Context) error {
 	// Dispatch and the lookup workers all stop on ctx, and Stream only returns
 	// once ctx is cancelled, so waiting here is what makes Run's return mean
@@ -227,8 +237,9 @@ func (k *Keeper) Run(ctx context.Context) error {
 	}
 
 	err := k.client.Stream(ctx, hue.StreamOptions{
-		Logger:    k.log,
-		OnConnect: k.onConnect,
+		Logger:                 k.log,
+		OnConnect:              k.onConnect,
+		MaxConsecutiveFailures: streamGiveUp,
 	}, k.HandleEvents)
 
 	workers.Wait()

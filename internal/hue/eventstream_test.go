@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -348,4 +349,135 @@ func waitUntil(t *testing.T, timeout time.Duration, cond func() bool, what strin
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s", what)
+}
+
+// TestStreamWatchdogArmedBeforeRequest: the watchdog must be running before
+// the request is sent, not after Do returns. The client has no Timeout (it
+// would cap the stream) and the transport sets no ResponseHeaderTimeout, so a
+// bridge that accepts the connection and then never writes a status line is
+// bounded by nothing else. Arming afterwards left the daemon deaf forever with
+// no log line and no reconnect.
+func TestStreamWatchdogArmedBeforeRequest(t *testing.T) {
+	prev := healthyConnection
+	healthyConnection = 10 * time.Millisecond
+	t.Cleanup(func() { healthyConnection = prev })
+
+	// Deliberately not streamServer: this handler never writes headers at all.
+	var reqs atomic.Int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		reqs.Add(1)
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+
+	c := testClient(srv.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = c.Stream(ctx, StreamOptions{
+			Logger:      discardLogger(),
+			ReadTimeout: 90 * time.Millisecond,
+		}, func([]Event) {})
+	}()
+	t.Cleanup(func() { cancel(); <-done })
+
+	waitUntil(t, 8*time.Second, func() bool { return reqs.Load() >= 2 },
+		"the watchdog to abandon a request that never got response headers")
+}
+
+// TestStreamWatchdogOpensANewConnection: cancelling the request context must
+// actually drop the TCP connection. Under HTTP/2 it only resets one stream and
+// returns the connection to the pool, so the reconnect lands on the same dead
+// pipe and the watchdog recovers nothing. Counting accepted connections rather
+// than requests is what tells the two apart.
+func TestStreamWatchdogOpensANewConnection(t *testing.T) {
+	prev := healthyConnection
+	healthyConnection = 10 * time.Millisecond
+	t.Cleanup(func() { healthyConnection = prev })
+
+	var conns atomic.Int32
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done() // connected, then silent
+	}))
+	srv.EnableHTTP2 = true
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		if s == http.StateNew {
+			conns.Add(1)
+		}
+	}
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+
+	c := testClient(srv.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = c.Stream(ctx, StreamOptions{
+			Logger:      discardLogger(),
+			ReadTimeout: 90 * time.Millisecond,
+		}, func([]Event) {})
+	}()
+	t.Cleanup(func() { cancel(); <-done })
+
+	waitUntil(t, 15*time.Second, func() bool { return conns.Load() >= 3 },
+		"each forced reconnect to open a fresh TCP connection")
+}
+
+// TestStreamGivesUpOnPermanentRejection: a revoked application key is not
+// worth retrying. Looping on it leaves the process alive and healthy-looking
+// while it does nothing, so the service manager never learns anything is wrong.
+func TestStreamGivesUpOnPermanentRejection(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"errors":[{"description":"unauthorized user"}]}`, http.StatusForbidden)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := testClient(srv.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := c.Stream(ctx, StreamOptions{Logger: discardLogger()}, func([]Event) {})
+	if err == nil {
+		t.Fatal("a 403 must end the stream, not be retried forever")
+	}
+	var se *StatusError
+	if !errors.As(err, &se) || se.StatusCode != http.StatusForbidden {
+		t.Fatalf("want a 403 StatusError, got %v", err)
+	}
+}
+
+// TestStreamGivesUpAfterMaxConsecutiveFailures: a bridge that is not answering
+// where we are looking for it - typically because its DHCP lease moved - has
+// to surface as an error so the caller can rediscover, rather than being
+// retried at the old address until someone edits the credentials file.
+func TestStreamGivesUpAfterMaxConsecutiveFailures(t *testing.T) {
+	prev := healthyConnection
+	healthyConnection = time.Hour // nothing counts as a healthy connection
+	t.Cleanup(func() { healthyConnection = prev })
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "busy", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := testClient(srv.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	err := c.Stream(ctx, StreamOptions{
+		Logger:                 discardLogger(),
+		MaxConsecutiveFailures: 2,
+	}, func([]Event) {})
+	if !errors.Is(err, ErrStreamUnreachable) {
+		t.Fatalf("want ErrStreamUnreachable, got %v", err)
+	}
 }
