@@ -355,7 +355,7 @@ func prepare(ctx context.Context, g globals, log *slog.Logger) (*config.Config, 
 	}
 	creds.SetPath(g.statePath)
 	if creds.AppKey == "" {
-		return nil, nil, nil, config.ErrNoCredentials
+		return nil, nil, nil, fmt.Errorf("%w (looked in %s)", config.ErrNoCredentials, g.statePath)
 	}
 	addr, err := resolveAddress(ctx, g, cfg, creds, log)
 	if err != nil {
@@ -507,7 +507,7 @@ func cmdRun(ctx context.Context, g globals, log *slog.Logger) error {
 	}
 	creds.SetPath(g.statePath)
 	if creds.AppKey == "" {
-		return config.ErrNoCredentials
+		return fmt.Errorf("%w (looked in %s)", config.ErrNoCredentials, g.statePath)
 	}
 	addr, err := resolveAddress(ctx, g, cfg, creds, log)
 	if err != nil {
@@ -519,9 +519,17 @@ func cmdRun(ctx context.Context, g globals, log *slog.Logger) error {
 	if creds.CertPin == "" {
 		log.Warn("no pinned bridge certificate yet; the first connection will trust whatever answers")
 	}
+	// config and state are logged because the two paths are the most common
+	// thing to get wrong: `auth` run in an interactive shell picks up
+	// XDG_STATE_HOME from the user's rc file, while the service manager runs
+	// with a bare environment and reads somewhere else. Without these the
+	// symptom is an unpaired daemon looping forever with nothing to show that
+	// the two halves are looking at different files.
 	log.Info("starting",
 		"version", version,
 		"bridge", addr,
+		"config", g.configPath,
+		"state", g.statePath,
 		"scene", cfg.SceneName,
 		"dry_run", g.dryRun,
 		"recall_cooldown", cfg.RecallCooldown.Duration(),
