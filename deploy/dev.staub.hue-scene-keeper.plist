@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd agent for hue-scene-keeper.
+
+  Installed to /Library/LaunchAgents by `go tool mage pkg:build`, or by hand into
+  ~/Library/LaunchAgents. The same file works in both places: the paths it needs
+  are expanded from $HOME at launch rather than baked in at install time, so
+  this plist needs no templating and every user gets their own log.
+
+  Manual install:
+    go tool mage go:build && sudo -E go tool mage go:install
+    cp deploy/dev.staub.hue-scene-keeper.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) \
+      ~/Library/LaunchAgents/dev.staub.hue-scene-keeper.plist
+
+  Pair first:  hue-scene-keeper auth
+  Logs:        tail -f ~/Library/Logs/hue-scene-keeper.log
+
+  The log file is not rotated. If you leave this running for months, add a
+  newsyslog.d rule or redirect the daemon somewhere rotated.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.staub.hue-scene-keeper</string>
+
+    <!--
+      Run through a shell so $HOME expands in the user's own session. launchd
+      does no variable substitution in StandardOutPath, and an agent's working
+      directory is / rather than the home directory, so a system-wide plist has
+      no other way to reach a per-user log. `exec` replaces the shell with the
+      daemon, so launchd still supervises the real process.
+    -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>mkdir -p "$HOME/Library/Logs" &amp;&amp; exec /usr/local/bin/hue-scene-keeper run &gt;&gt; "$HOME/Library/Logs/hue-scene-keeper.log" 2&gt;&amp;1</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart if it ever exits; the daemon is meant to run forever. -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!--
+      Until `hue-scene-keeper auth` has been run there are no credentials and
+      `run` exits immediately, so KeepAlive retries it. That means pairing is
+      picked up on its own with no second command, but it also means the
+      unpaired window is a restart loop. launchd has no equivalent of systemd's
+      StartLimitBurst, so a wider throttle is the only way to keep that loop
+      from filling the log; 30s still recovers promptly from a real crash.
+    -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <!-- Adaptive, not Background: Background subjects the process to timer
+         coalescing, which can defer the 300ms trigger batching. -->
+    <key>ProcessType</key>
+    <string>Adaptive</string>
+</dict>
+</plist>

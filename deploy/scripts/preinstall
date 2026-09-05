@@ -1,0 +1,19 @@
+#!/bin/sh
+# Stop a running agent before the payload replaces its binary.
+#
+# The installer runs as root, but the agent lives in the console user's GUI
+# domain, so it has to be booted out of that domain specifically. A missing or
+# already-stopped job is the normal case on a first install, not an error.
+set -eu
+
+LABEL=dev.staub.hue-scene-keeper
+
+CONSOLE_USER=$(/usr/bin/stat -f "%Su" /dev/console 2>/dev/null || echo "")
+if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ]; then
+    CONSOLE_UID=$(/usr/bin/id -u "$CONSOLE_USER" 2>/dev/null || echo "")
+    if [ -n "$CONSOLE_UID" ]; then
+        /bin/launchctl bootout "gui/$CONSOLE_UID/$LABEL" 2>/dev/null || true
+    fi
+fi
+
+exit 0

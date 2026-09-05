@@ -1,0 +1,63 @@
+# systemd unit for hue-scene-keeper.
+#
+# Install:
+#   go tool mage go:build && sudo -E go tool mage go:install
+#   sudo useradd --system --home-dir /var/lib/hue-scene-keeper --shell /usr/sbin/nologin hue
+#   sudo install -d -o hue -g hue -m0700 /var/lib/hue-scene-keeper
+#   sudo install -d -m0755 /etc/hue-scene-keeper
+#   sudo install -m0644 deploy/hue-scene-keeper.service /etc/systemd/system/
+#
+# Pair BEFORE starting the service, as the service user and with the same
+# --state path the unit uses. Paths are passed explicitly rather than through
+# XDG_* so that this command and the unit cannot drift apart:
+#
+#   sudo -u hue /usr/local/bin/hue-scene-keeper \
+#       --state /var/lib/hue-scene-keeper/credentials.json auth
+#
+# Then:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now hue-scene-keeper
+#   journalctl -u hue-scene-keeper -f
+
+[Unit]
+Description=Keep Philips Hue rooms in their all-day smart scene
+After=network-online.target
+Wants=network-online.target
+
+# Do not restart-loop forever on an unrecoverable error such as missing
+# credentials; fail visibly instead of filling the journal.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=hue
+Group=hue
+ExecStart=/usr/local/bin/hue-scene-keeper \
+    --config /etc/hue-scene-keeper/config.yaml \
+    --state /var/lib/hue-scene-keeper/credentials.json \
+    run
+Restart=always
+RestartSec=5s
+
+StateDirectory=hue-scene-keeper
+StateDirectoryMode=0700
+ConfigurationDirectory=hue-scene-keeper
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

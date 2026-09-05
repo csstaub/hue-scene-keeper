@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  productbuild distribution for the hue-scene-keeper installer.
+
+  The component package is referenced by bare filename; the package-path option
+  passed to productbuild supplies the directory it is found in.
+-->
+<installer-gui-script minSpecVersion="2">
+    <title>hue-scene-keeper</title>
+    <organization>dev.staub</organization>
+
+    <!-- Nothing to choose: one component, installed to / or not at all. -->
+    <options customize="never" require-scripts="true" hostArchitectures="arm64,x86_64"/>
+
+    <volume-check>
+        <allowed-os-versions>
+            <os-version min="13.0"/>
+        </allowed-os-versions>
+    </volume-check>
+
+    <choices-outline>
+        <line choice="default"/>
+    </choices-outline>
+    <choice id="default" title="hue-scene-keeper">
+        <pkg-ref id="dev.staub.hue-scene-keeper"/>
+    </choice>
+
+    <pkg-ref id="dev.staub.hue-scene-keeper">component.pkg</pkg-ref>
+
+    <conclusion file="conclusion.html" mime-type="text/html"/>
+</installer-gui-script>

@@ -1,0 +1,6 @@
+version: "2"
+
+# The magefiles directory is excluded by its build tag: mage generates the
+# main function at compile time, so the package does not type-check on its own.
+linters:
+  default: standard

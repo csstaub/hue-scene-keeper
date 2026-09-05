@@ -1,0 +1,49 @@
+#!/bin/sh
+# Place the binary, then load the agent into the console user's GUI domain so
+# it starts now rather than at the next login.
+#
+# The binary is installed from here rather than shipped in the payload on
+# purpose. A payload that contains /usr/local/bin also records an owner for it,
+# and installing would reset that directory on machines where it belongs to the
+# user (Homebrew and hand-rolled installs both do this). Creating files inside
+# those directories leaves their ownership alone; listing them in the payload
+# does not.
+#
+# Nothing here touches ~/.config or ~/.local/state: the daemon runs without a
+# config file, and the credentials are the user's to create with `auth`. An
+# install must never overwrite either.
+set -eu
+
+LABEL=dev.staub.hue-scene-keeper
+PLIST="/Library/LaunchAgents/$LABEL.plist"
+HERE=$(/usr/bin/dirname "$0")
+
+# Only create these if they are absent; never re-own one that already exists.
+[ -d /usr/local/bin ] || /usr/bin/install -d -o root -g wheel -m 0755 /usr/local/bin
+[ -d /usr/local/share/hue-scene-keeper ] || \
+    /usr/bin/install -d -o root -g wheel -m 0755 /usr/local/share/hue-scene-keeper
+
+/usr/bin/install -o root -g wheel -m 0755 "$HERE/hue-scene-keeper" /usr/local/bin/hue-scene-keeper
+/usr/bin/install -o root -g wheel -m 0644 "$HERE/config.example.yaml" \
+    /usr/local/share/hue-scene-keeper/config.example.yaml
+
+CONSOLE_USER=$(/usr/bin/stat -f "%Su" /dev/console 2>/dev/null || echo "")
+if [ -z "$CONSOLE_USER" ] || [ "$CONSOLE_USER" = "root" ]; then
+    # Installed with nobody logged in - RunAtLoad picks it up at next login.
+    exit 0
+fi
+
+CONSOLE_UID=$(/usr/bin/id -u "$CONSOLE_USER" 2>/dev/null || echo "")
+[ -n "$CONSOLE_UID" ] || exit 0
+
+# Enable before bootstrap, not after. `enable` clears the label from launchd's
+# per-user disabled database, and bootstrapping a disabled label fails with
+# "Bootstrap failed: 5: Input/output error". A label gets onto that list from
+# `launchctl disable` or a legacy `launchctl unload -w`, and it stays there even
+# after the plist is deleted -- so with enable last, an install that hit a
+# disabled label could never recover on its own.
+/bin/launchctl bootout "gui/$CONSOLE_UID/$LABEL" 2>/dev/null || true
+/bin/launchctl enable "gui/$CONSOLE_UID/$LABEL"
+/bin/launchctl bootstrap "gui/$CONSOLE_UID" "$PLIST"
+
+exit 0
