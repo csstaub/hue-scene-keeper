@@ -119,6 +119,12 @@ type pendingRecall struct {
 	// attempt counts the retries already spent on this recall.
 	attempt int
 
+	// foldedPowerRestore records that a power_restored trigger folded into an
+	// entry created by some other reason. It is sticky and never cleared: one
+	// lamp coming back on mains is reason enough to restyle the room however
+	// the entry started life.
+	foldedPowerRestore bool
+
 	// The suppression state to put back if the bridge refuses this recall.
 	// It has to be carried on the entry because arming and finding out are no
 	// longer the same moment - a request sits on the wire in between.
@@ -126,6 +132,17 @@ type pendingRecall struct {
 	hadRecall    bool
 	prevSuppress time.Time
 	hadSuppress  bool
+}
+
+// skipsOnCheck reports whether commit's "is any light still on" veto does not
+// apply, because a lamp somewhere in the group came back on mains.
+//
+// A power_restored lookup deliberately never writes what it read back into the
+// registry, so the registry has no record of the lamp returning and would veto
+// every restore. Both sources count: the reason this entry was created for,
+// and any power_restored trigger that folded into it afterwards.
+func (p *pendingRecall) skipsOnCheck() bool {
+	return p.foldedPowerRestore || p.reason == reasonPowerRestored
 }
 
 // outcome carries a sent recall back to dispatch, which owns every piece of
@@ -620,6 +637,16 @@ func (k *Keeper) schedule(pending map[string]*pendingRecall, t trigger) bool {
 		// The same event seen through another light in the room, or a retry
 		// already counting down. Either way this is more activity in a group
 		// we are already going to recall.
+		//
+		// The exemption from commit's "is anything still on" veto has to carry
+		// across the fold, though. A power_restored lookup deliberately never
+		// writes what it read back into the registry, so the registry has no
+		// record of the lamp returning; folding that trigger into an entry
+		// created by an ordinary switch-on would leave the older reason in
+		// place and the restore would be vetoed and dropped, with no retry.
+		if r.reason == reasonPowerRestored {
+			p.foldedPowerRestore = true
+		}
 		return k.extend(p)
 	}
 
@@ -918,7 +945,7 @@ func (k *Keeper) commit(p *pendingRecall) bool {
 	// returning and would veto every restore. Switch-on, startup and reconnect
 	// all take their triggers from the registry in the first place, so asking
 	// it again here is both meaningful and current.
-	if r.reason != reasonPowerRestored && !k.reg.GroupHasLightOn(r.groupID) {
+	if !p.skipsOnCheck() && !k.reg.GroupHasLightOn(r.groupID) {
 		k.log.Info("skipping recall, no light in the group is on any more", "group", r.groupName)
 		return false
 	}

@@ -986,3 +986,43 @@ func TestASlowRecallDoesNotLoseAnotherRoom(t *testing.T) {
 		t.Fatalf("expected both rooms recalled in order, got %v", got)
 	}
 }
+
+// TestPowerRestoreKeepsItsExemptionWhenFoldedIntoAPendingRecall: a
+// power_restored trigger arriving for a group that is already pending is
+// folded into the existing entry, which keeps the reason it was created with.
+// The exemption from commit's "is any light still on" veto has to survive that
+// fold, or the restore is silently vetoed and dropped with no retry - the lamp
+// that came back on mains is never written into the registry, so the veto has
+// nothing to see.
+func TestPowerRestoreKeepsItsExemptionWhenFoldedIntoAPendingRecall(t *testing.T) {
+	b, lights := kitchenBridge(t) // every light off
+	reg := registry.New()
+	k := New(b.Client(), reg, testConfig(), testLogger(t), false)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := k.Resync(ctx); err != nil {
+		t.Fatalf("resync: %v", err)
+	}
+
+	pending := map[string]*pendingRecall{}
+	light := lights[0]
+
+	// A light flicks on, creating the entry, and goes straight back off.
+	if !k.schedule(pending, trigger{kind: kindLight, id: light, reason: reasonSwitchedOn}) {
+		t.Fatal("the first trigger should have created a pending entry")
+	}
+	// Then a lamp's mains comes back, folding into that same entry.
+	k.schedule(pending, trigger{kind: kindLight, id: light, reason: reasonPowerRestored})
+
+	p, ok := pending["room-kitchen"]
+	if !ok {
+		t.Fatal("the group should still be pending")
+	}
+	if !p.skipsOnCheck() {
+		t.Fatal("a folded power_restored trigger must carry its exemption onto the entry")
+	}
+	if !k.commit(p) {
+		t.Fatal("the restore was vetoed: no light is on in the registry, which is exactly what power_restored is exempt from")
+	}
+}

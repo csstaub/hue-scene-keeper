@@ -40,6 +40,12 @@ type globals struct {
 	logLevel   string
 	jsonOut    bool
 	resetPin   bool
+
+	// configSet records that --config was given explicitly. A missing config
+	// file is fine at the default path - the zero configuration works - but at
+	// a path the user named it is a typo, and carrying on with defaults would
+	// silently drop every exclusion they think is protecting a room.
+	configSet bool
 }
 
 func main() {
@@ -108,6 +114,12 @@ func run() error {
 		return err
 	}
 
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "config" {
+			g.configSet = true
+		}
+	})
+
 	command := "run"
 	args := fs.Args()
 	if len(args) > 0 {
@@ -127,6 +139,11 @@ func run() error {
 			}
 			return err
 		}
+		sub.Visit(func(f *flag.Flag) {
+			if f.Name == "config" {
+				g.configSet = true
+			}
+		})
 		args = sub.Args()
 	}
 
@@ -271,6 +288,11 @@ func newClient(cfg *config.Config, creds *config.Credentials, addr string) *hue.
 }
 
 func loadAll(g globals) (*config.Config, *config.Credentials, error) {
+	if g.configSet {
+		if _, err := os.Stat(g.configPath); err != nil {
+			return nil, nil, fmt.Errorf("--config %s: %w", g.configPath, err)
+		}
+	}
 	cfg, err := config.Load(g.configPath)
 	if err != nil {
 		return nil, nil, err

@@ -236,6 +236,14 @@ func (c *Config) validate() error {
 	sort.Strings(keys)
 	seen := make(map[string]string, len(keys))
 	for _, key := range keys {
+		// An empty value is the `Bedroom:` slip - a key written with nothing
+		// after the colon. It reads as an override to every later stage, so
+		// the group takes the override branch, looks up the scene id "", finds
+		// nothing, and is never recalled again. Nothing downstream can tell
+		// that apart from a deliberate choice, so it is rejected here.
+		if strings.TrimSpace(c.SmartSceneOverrides[key]) == "" {
+			return fmt.Errorf("smart_scene_overrides: key %q has no scene; give it a smart scene id or remove the line", key)
+		}
 		k := normalise(key)
 		if prev, dup := seen[k]; dup {
 			return fmt.Errorf("smart_scene_overrides: keys %q and %q are the same key once case and surrounding whitespace are ignored", prev, key)
@@ -486,6 +494,25 @@ func resolveOverrides(c *Config, groups []hue.Group, ex *Exclusions) {
 			ex.OverrideProblems = append(ex.OverrideProblems, fmt.Sprintf(
 				"smart_scene_overrides: key %q matches no room or zone, so that group keeps the scene picked by name", key))
 		}
+	}
+
+	// The mirror of the several-keys-one-group case above: one key matching
+	// several groups. Two rooms sharing a name both take the same scene id,
+	// and the one it does not belong to fails the scene-owns-this-group check
+	// at recall time - so that room is silently never recalled.
+	for _, key := range keys {
+		var matched []hue.Group
+		for _, g := range groups {
+			if overrideKeyMatches(key, g) {
+				matched = append(matched, g)
+			}
+		}
+		if len(matched) < 2 {
+			continue
+		}
+		ex.OverrideProblems = append(ex.OverrideProblems, fmt.Sprintf(
+			"smart_scene_overrides: key %q matches %s; a smart scene belongs to one group, so every other one is left unrecalled - use the group id instead",
+			key, describeGroups(matched)))
 	}
 }
 

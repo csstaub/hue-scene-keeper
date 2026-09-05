@@ -499,3 +499,41 @@ func TestOutOfRangeTuningIsRejected(t *testing.T) {
 		})
 	}
 }
+
+// TestLoadRejectsOverrideWithNoScene: `Bedroom:` with nothing after the colon
+// is a common YAML slip. It reads as an override everywhere downstream, so the
+// group takes the override branch, looks up scene id "", finds nothing, and is
+// never recalled again - with nothing but a per-recall log line to say so.
+func TestLoadRejectsOverrideWithNoScene(t *testing.T) {
+	for _, body := range []string{
+		"smart_scene_overrides:\n  Bedroom:\n",
+		"smart_scene_overrides:\n  Bedroom: \"\"\n",
+		"smart_scene_overrides:\n  Bedroom: \"   \"\n",
+	} {
+		if _, err := Load(writeConfig(t, body)); err == nil {
+			t.Errorf("an override with no scene must be rejected at load time: %q", body)
+		}
+	}
+}
+
+// TestResolveOverridesReportsOneKeyMatchingSeveralGroups: a smart scene belongs
+// to one group, so a key matching two same-named rooms pins a scene that only
+// one of them can use. The other fails the scene-owns-this-group check at
+// recall time and is silently never recalled.
+func TestResolveOverridesReportsOneKeyMatchingSeveralGroups(t *testing.T) {
+	look := testLookup()
+	look.rooms = append(look.rooms, hue.Group{
+		ID: "r2", Type: hue.TypeRoom, Metadata: &hue.Metadata{Name: "Bedroom"},
+	})
+
+	cfg := Default()
+	cfg.SmartSceneOverrides = map[string]string{"Bedroom": "scene-x"}
+
+	ex := ResolveExclusions(cfg, look)
+	if len(ex.OverrideProblems) == 0 {
+		t.Fatal("one key matching two groups must be reported")
+	}
+	if !strings.Contains(ex.OverrideProblems[0], "Bedroom") {
+		t.Errorf("the problem should name the key, got %q", ex.OverrideProblems[0])
+	}
+}
