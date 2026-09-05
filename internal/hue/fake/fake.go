@@ -31,8 +31,19 @@ type Bridge struct {
 	recalls []string
 	// attempts counts every recall request the bridge answered, refusals
 	// included; recalls counts only the ones it accepted.
-	attempts int
-	subs     map[*subscriber]struct{}
+	attempts  int
+	subs      map[*subscriber]struct{}
+	keepalive time.Duration
+
+	// echoes tracks the recall-echo goroutines, which are started after the
+	// response is written and so outlive the request. Without waiting for
+	// them, one can log after the test finished and panic the whole binary.
+	echoes sync.WaitGroup
+
+	// failures collects problems noticed on goroutines other than the test's.
+	// t.Fatalf from those calls runtime.Goexit on the wrong goroutine, which
+	// does not stop the test; they are drained in Cleanup instead.
+	failures []string
 	nextID   int
 	// failRecalls makes the next N recalls return failStatus, for exercising
 	// the daemon's error handling.
@@ -68,11 +79,35 @@ func NewBridge(t *testing.T) *Bridge {
 		subs:    map[*subscriber]struct{}{},
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/eventstream/clip/v2", b.handleStream)
-	mux.HandleFunc("/clip/v2/resource/", b.handleResource)
+	mux.HandleFunc("/eventstream/clip/v2", b.requireKey(b.handleStream))
+	mux.HandleFunc("/clip/v2/resource/", b.requireKey(b.handleResource))
 	b.server = httptest.NewTLSServer(mux)
-	t.Cleanup(b.server.Close)
+	t.Cleanup(func() {
+		b.server.Close()
+		// Close does not wait for the echo goroutines: they are spawned after
+		// the response is written, so they are not "in flight" as far as the
+		// server is concerned.
+		b.echoes.Wait()
+		b.mu.Lock()
+		failures := b.failures
+		b.mu.Unlock()
+		for _, f := range failures {
+			t.Error(f)
+		}
+	})
 	return b
+}
+
+// fail records a problem noticed on a goroutine that is not the test's.
+//
+// t.Fatalf from such a goroutine calls runtime.Goexit on the wrong one, which
+// does not stop the test and can leave it reporting a confusing downstream
+// failure instead. Recording and draining in Cleanup reports it against the
+// right test, in the right place.
+func (b *Bridge) fail(format string, args ...any) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.failures = append(b.failures, fmt.Sprintf(format, args...))
 }
 
 // Client returns a client pointed at the fake, with pinning disabled and the
@@ -181,7 +216,8 @@ func (b *Bridge) SwitchLight(lightID string, on bool) {
 	light, ok := b.lights[lightID]
 	if !ok {
 		b.mu.Unlock()
-		b.t.Fatalf("fake bridge: unknown light %q", lightID)
+		b.fail("fake bridge: unknown light %q", lightID)
+		return
 	}
 	light.On = &hue.On{On: on}
 	b.lights[lightID] = light
@@ -202,7 +238,8 @@ func (b *Bridge) SetConnectivity(connID, status string) {
 	conn, ok := b.conns[connID]
 	if !ok {
 		b.mu.Unlock()
-		b.t.Fatalf("fake bridge: unknown connectivity service %q", connID)
+		b.fail("fake bridge: unknown connectivity service %q", connID)
+		return
 	}
 	conn.Status = status
 	b.conns[connID] = conn
@@ -230,7 +267,8 @@ func (b *Bridge) Publish(action string, resources ...map[string]any) {
 	for _, r := range resources {
 		raw, err := json.Marshal(r)
 		if err != nil {
-			b.t.Fatalf("fake bridge: marshal event: %v", err)
+			b.fail("fake bridge: marshal event: %v", err)
+			continue
 		}
 		data = append(data, raw)
 	}
@@ -246,7 +284,8 @@ func (b *Bridge) Publish(action string, resources ...map[string]any) {
 		Data:         data,
 	}})
 	if err != nil {
-		b.t.Fatalf("fake bridge: marshal frame: %v", err)
+		b.fail("fake bridge: marshal frame: %v", err)
+		return
 	}
 	b.broadcast(fmt.Sprintf("id: %d\ndata: %s\n\n", id, payload))
 }
@@ -266,7 +305,7 @@ func (b *Bridge) broadcast(frame string) {
 		case s.frames <- frame:
 		case <-s.quit:
 		case <-time.After(2 * time.Second):
-			b.t.Errorf("fake bridge: subscriber did not consume event frame")
+			b.fail("fake bridge: subscriber did not consume event frame")
 		}
 	}
 }
@@ -304,7 +343,8 @@ func (b *Bridge) TouchLight(lightID string, brightness float64) {
 	light, ok := b.lights[lightID]
 	b.mu.Unlock()
 	if !ok {
-		b.t.Fatalf("fake bridge: unknown light %q", lightID)
+		b.fail("fake bridge: unknown light %q", lightID)
+		return
 	}
 	b.Publish("update", map[string]any{
 		"id": lightID, "type": hue.TypeLight,
@@ -367,10 +407,29 @@ func (b *Bridge) WaitForSubscriber(timeout time.Duration) bool {
 
 // --- HTTP handlers ----------------------------------------------------------
 
+// knownTypes are the resource types the fake serves. Anything else is a 404,
+// as on a real bridge: answering 200 with an empty list would let a typo'd or
+// renamed rtype read as "this home has no lights" instead of as an error.
+var knownTypes = map[string]bool{
+	hue.TypeDevice:             true,
+	hue.TypeLight:              true,
+	hue.TypeRoom:               true,
+	hue.TypeZone:               true,
+	hue.TypeSmartScene:         true,
+	hue.TypeZigbeeConnectivity: true,
+}
+
 func (b *Bridge) handleResource(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/clip/v2/resource/")
 	parts := strings.Split(path, "/")
 	rtype := parts[0]
+
+	if !knownTypes[rtype] {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = fmt.Fprintf(w, `{"errors":[{"description":"unknown resource type %s"}],"data":[]}`, rtype)
+		return
+	}
 
 	if r.Method == http.MethodPut {
 		b.handlePut(w, r, rtype, parts)
@@ -440,7 +499,11 @@ func (b *Bridge) handlePut(w http.ResponseWriter, r *http.Request, rtype string,
 		// A real bridge turns on every light in the group, and each reports
 		// itself as newly on. This is exactly the feedback the daemon must
 		// not chase.
-		go b.echoGroupOn(groupID)
+		b.echoes.Add(1)
+		go func() {
+			defer b.echoes.Done()
+			b.echoGroupOn(groupID)
+		}()
 	}
 }
 
@@ -541,8 +604,27 @@ func (b *Bridge) handleStream(w http.ResponseWriter, r *http.Request) {
 		b.mu.Unlock()
 	}()
 
-	keepalive := time.NewTicker(200 * time.Millisecond)
-	defer keepalive.Stop()
+	// The real bridge sends this at connect and then, on a live but quiet
+	// connection, nothing at all for minutes.
+	if _, err := fmt.Fprint(w, ": hi\n\n"); err != nil {
+		return
+	}
+	flusher.Flush()
+
+	// Keepalives are opt-in and off by default, because the real bridge does
+	// not send them. A fake that chatters every 200ms means no test ever sees
+	// an idle stream, so nothing exercises the watchdog or anything else that
+	// has to tolerate multi-minute silence.
+	b.mu.Lock()
+	period := b.keepalive
+	b.mu.Unlock()
+
+	var keepaliveC <-chan time.Time
+	if period > 0 {
+		ticker := time.NewTicker(period)
+		defer ticker.Stop()
+		keepaliveC = ticker.C
+	}
 
 	for {
 		select {
@@ -555,11 +637,35 @@ func (b *Bridge) handleStream(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			flusher.Flush()
-		case <-keepalive.C:
+		case <-keepaliveC:
 			if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
 				return
 			}
 			flusher.Flush()
 		}
+	}
+}
+
+// Keepalive makes the fake send SSE comment frames every d. It is off by
+// default: the real bridge does not keepalive, and a stream that is never idle
+// hides every bug in the code that copes with silence.
+func (b *Bridge) Keepalive(d time.Duration) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.keepalive = d
+}
+
+// requireKey rejects a request without the application key, as the bridge does.
+// Without this a regression that stopped sending the header would pass every
+// test here and fail against every real bridge.
+func (b *Bridge) requireKey(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("hue-application-key") != "test-key" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = fmt.Fprint(w, `{"errors":[{"description":"unauthorized user"}],"data":[]}`)
+			return
+		}
+		next(w, r)
 	}
 }
