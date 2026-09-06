@@ -95,8 +95,19 @@ func Stop(ctx context.Context, out io.Writer) error {
 	return nil
 }
 
+// notRunningError is how Status answers a script rather than a person: main
+// turns it into exit status 3 - the LSB code for "the program is not running"
+// - and prints nothing for it, because Status has already said so in words.
+type notRunningError struct{}
+
+func (notRunningError) Error() string   { return binName + " is not running" }
+func (notRunningError) ExitStatus() int { return 3 }
+
 // Status reports whether the agent is running, and whether it will come back
 // on its own - the two halves of "is anything else about to move my lights?".
+//
+// It returns notRunningError when nothing is running, so `status` can be used
+// in a monitoring check without parsing its prose.
 func Status(ctx context.Context, out io.Writer) error {
 	_, _ = fmt.Fprintf(out, "service:   launchd agent %s\n", Label)
 
@@ -139,6 +150,9 @@ func Status(ctx context.Context, out io.Writer) error {
 	}
 
 	_, _ = fmt.Fprintln(out, verdict(running))
+	if !running {
+		return notRunningError{}
+	}
 	return nil
 }
 
