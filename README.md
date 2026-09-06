@@ -318,3 +318,12 @@ requirements for building the daemon.
 
 Tests need no hardware: `internal/hue/fake` implements enough of a bridge — resource
 endpoints, smart scene recall, and a scriptable SSE stream — to run the daemon end to end.
+
+## Licence
+
+Copyright © 2026 Cedric Staub
+
+Licensed under the EUPL, either version 1.2 or — as soon as they are approved by
+the European Commission — later versions of the EUPL. The full text is in
+[`LICENSE`](LICENSE), and official translations into the other EU languages are
+at <https://joinup.ec.europa.eu/collection/eupl/eupl-text-eupl-12>.
