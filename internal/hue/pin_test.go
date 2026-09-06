@@ -1,45 +1,19 @@
 package hue
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/sha256"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/base64"
 	"errors"
-	"math/big"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// selfSigned builds a bridge-like certificate and returns its DER bytes and
-// the base64 SHA-256 of its SubjectPublicKeyInfo - the value the pin holds.
+// selfSigned returns the DER bytes of a bridge-like certificate and the pin
+// value that certificate should produce.
 func selfSigned(t *testing.T) (der []byte, pin string) {
 	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "bridge"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-	}
-	der, err = x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	if err != nil {
-		t.Fatalf("create certificate: %v", err)
-	}
-	parsed, err := x509.ParseCertificate(der)
-	if err != nil {
-		t.Fatalf("parse certificate: %v", err)
-	}
-	sum := sha256.Sum256(parsed.RawSubjectPublicKeyInfo)
-	return der, base64.StdEncoding.EncodeToString(sum[:])
+	cert, pin := selfSignedCert(t)
+	return cert.Certificate[0], pin
 }
 
 // TestPinLearnsOnFirstContact: trust-on-first-use. The bridge is self-signed,

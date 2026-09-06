@@ -3,9 +3,12 @@ package hue
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -225,6 +228,112 @@ func TestEnvelopeRefusalOnReadsIsNotRetried(t *testing.T) {
 	}
 	if _, err := c.GetLight(context.Background(), "light-1"); err == nil || Retryable(err) {
 		t.Errorf("GetLight: want a non-retryable error, got %v", err)
+	}
+}
+
+// TestClientResumesTLSSessions: without a ClientSessionCache every connection
+// to the bridge is a full handshake, and the pool is nearly always cold when a
+// recall goes out - so that handshake sits on the critical path of a
+// user-visible event, on a bridge slow enough for it to matter.
+func TestClientResumesTLSSessions(t *testing.T) {
+	var resumed []bool
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resumed = append(resumed, r.TLS != nil && r.TLS.DidResume)
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	// Pinning left on: this is the production shape, and the point is that the
+	// two compose. The first handshake is full, so the pin is still learned.
+	c := New(Options{BaseURL: srv.URL, AppKey: "k", RequestsPerSecond: 100})
+	transport, _ := c.http.Transport.(*http.Transport)
+	for i := range 2 {
+		if _, err := c.GetResource(context.Background(), "light"); err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+		// A fresh connection each time - the >90s idle case, where a pooled
+		// connection would have been closed long before the next recall.
+		transport.CloseIdleConnections()
+	}
+
+	if len(resumed) != 2 {
+		t.Fatalf("server saw %d requests, want 2", len(resumed))
+	}
+	if resumed[0] {
+		t.Error("the first handshake of a process must be full, or nothing is pinned")
+	}
+	if !resumed[1] {
+		t.Error("the second connection paid a full handshake; the session cache is not wired up")
+	}
+}
+
+// TestPinStillFailsClosedWhenSessionsResume: Go does not call
+// VerifyPeerCertificate on a resumed handshake - it restores the peer
+// certificates from the session - so the session cache moves the pin check
+// from per-connection to per-full-handshake. This is the test that says that
+// is still safe: only a peer holding the master secret of a session we already
+// pinned can resume one, so a replaced bridge gets a full handshake and the
+// check that comes with it.
+func TestPinStillFailsClosedWhenSessionsResume(t *testing.T) {
+	certA, pinA := selfSignedCert(t)
+	certB, _ := selfSignedCert(t)
+
+	var resumed []bool
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resumed = append(resumed, r.TLS != nil && r.TLS.DidResume)
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	})
+	// A fixed address, so the replacement bridge answers where the first one
+	// did - which is what makes the cached session eligible at all.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	serve := func(ln net.Listener, cert tls.Certificate) *http.Server {
+		srv := &http.Server{
+			Handler:           handler,
+			TLSConfig:         &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
+			ReadHeaderTimeout: 5 * time.Second,
+			ErrorLog:          log.New(io.Discard, "", 0),
+		}
+		go func() { _ = srv.ServeTLS(ln, "", "") }()
+		return srv
+	}
+	first := serve(ln, certA)
+
+	c := New(Options{BaseURL: "https://" + addr, AppKey: "k", RequestsPerSecond: 100})
+	transport, _ := c.http.Transport.(*http.Transport)
+	for i := range 2 {
+		if _, err := c.GetResource(context.Background(), "light"); err != nil {
+			t.Fatalf("request %d against the pinned bridge: %v", i, err)
+		}
+		transport.CloseIdleConnections()
+	}
+	if got := c.Pin().Value(); got != pinA {
+		t.Fatalf("pin = %q, want %q", got, pinA)
+	}
+	if len(resumed) != 2 || !resumed[1] {
+		t.Fatalf("the second connection did not resume (%v); the case under test never arose", resumed)
+	}
+
+	// Same address, different key: a replaced bridge, or something pretending
+	// to be one.
+	_ = first.Close()
+	ln, err = net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatalf("relisten on %s: %v", addr, err)
+	}
+	second := serve(ln, certB)
+	t.Cleanup(func() { _ = second.Close() })
+	transport.CloseIdleConnections()
+
+	_, err = c.GetResource(context.Background(), "light")
+	if !errors.Is(err, ErrPinMismatch) {
+		t.Fatalf("a different key must not be trusted, got %v", err)
+	}
+	if got := c.Pin().Value(); got != pinA {
+		t.Fatal("a rejected certificate must not replace the stored pin")
 	}
 }
 

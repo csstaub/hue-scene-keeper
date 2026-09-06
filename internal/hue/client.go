@@ -336,6 +336,22 @@ func New(o Options) *Client {
 		// The bridge is self-signed; Pin.verify supplies the real check.
 		InsecureSkipVerify: true,
 		MinVersion:         tls.VersionTLS12,
+		// Session resumption. Without it every connection to the bridge is a
+		// full handshake, and IdleConnTimeout below means the pool is nearly
+		// always cold when a recall goes out - the gap between one room and
+		// the next is minutes - so the handshake lands on the critical path of
+		// a user-visible event, on a bridge slow enough for it to matter.
+		//
+		// Note this means Pin.verify is NOT called on a resumed handshake: Go
+		// restores PeerCertificates from the session rather than re-verifying.
+		// That is safe because only a peer holding the master secret of a
+		// session we already pinned can resume one; an impersonator, or a
+		// replaced bridge, can only offer a full handshake, which runs the
+		// check and fails closed. Set outside the !o.Insecure branch below
+		// because the cache is orthogonal to pinning. The size is nominal: one
+		// bridge, and with ServerName filled in by the transport the key is
+		// the host we are talking to.
+		ClientSessionCache: tls.NewLRUClientSessionCache(8),
 	}
 	if !o.Insecure {
 		tlsCfg.VerifyPeerCertificate = pin.verify
