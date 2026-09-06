@@ -14,9 +14,21 @@ import (
 	"time"
 )
 
-// healthyConnection is how long a stream must stay up before we stop counting
-// its loss as a consecutive failure. Variable so tests can shorten it.
-var healthyConnection = 60 * time.Second
+// defaultHealthyConnection is how long a stream must stay up before we stop
+// counting its loss as a consecutive failure.
+const defaultHealthyConnection = 60 * time.Second
+
+// maxFrameBytes caps how much of one SSE frame we will buffer. A whole-home
+// update runs to a few hundred kilobytes, so this is orders of magnitude
+// above anything a bridge sends; it exists only so a peer that streams
+// without ever sending a newline, or data: lines without the blank line that
+// terminates the frame, cannot grow the heap until the daemon is OOM-killed.
+const maxFrameBytes = 8 << 20
+
+// errFrameTooLarge reports that a frame passed maxFrameBytes. It is retryable:
+// the frame is abandoned and the connection recycled, and the resync on the
+// next connect is what puts the caller back in step.
+var errFrameTooLarge = errors.New("event stream frame too large")
 
 // errStreamSilent reports that the watchdog tore the connection down because
 // the bridge stopped sending. It is retryable - the point is only to stop the
@@ -68,6 +80,13 @@ type StreamOptions struct {
 	// file by hand - across restarts, since the address is read back from
 	// there. Giving up lets the caller rediscover.
 	MaxConsecutiveFailures int
+	// HealthyConnection is how long a connection must stay up before losing
+	// it stops counting as a consecutive failure. Defaults to 60 seconds.
+	//
+	// Per-stream rather than a package variable so tests can shorten it
+	// without writing shared state that another test's still-running Stream
+	// goroutine is reading.
+	HealthyConnection time.Duration
 }
 
 // Stream consumes the bridge's server-sent event stream, reconnecting with
@@ -88,6 +107,10 @@ func (c *Client) Stream(ctx context.Context, opts StreamOptions, handle func([]E
 	readTimeout := opts.ReadTimeout
 	if readTimeout <= 0 {
 		readTimeout = 15 * time.Minute
+	}
+	healthy := opts.HealthyConnection
+	if healthy <= 0 {
+		healthy = defaultHealthyConnection
 	}
 
 	failures := 0
@@ -137,7 +160,7 @@ func (c *Client) Stream(ctx context.Context, opts StreamOptions, handle func([]E
 		switch {
 		case errors.Is(err, errStreamSilent):
 			failures++
-		case time.Since(start) >= healthyConnection:
+		case time.Since(start) >= healthy:
 			failures = 0
 		default:
 			failures++
@@ -270,7 +293,7 @@ func (c *Client) streamOnce(
 	var data strings.Builder
 
 	for {
-		line, err := br.ReadString('\n')
+		line, err := readLine(br, maxFrameBytes)
 		if len(line) > 0 {
 			consumeLine(strings.TrimRight(line, "\r\n"), &data, handle)
 		}
@@ -280,6 +303,35 @@ func (c *Client) streamOnce(
 			}
 			return fail(err)
 		}
+		// The per-line cap does not bound a frame built from many data:
+		// lines that never sees its terminating blank line, so the
+		// accumulation is capped too.
+		if data.Len() > maxFrameBytes {
+			return fail(fmt.Errorf("%w: %d bytes with no frame terminator", errFrameTooLarge, data.Len()))
+		}
+	}
+}
+
+// readLine reads one newline-terminated line, refusing to buffer more than
+// limit bytes.
+//
+// bufio.NewReaderSize sets only the *initial* buffer, and ReadString grows
+// without bound, so a peer that sends bytes and never a newline would
+// otherwise be allowed to allocate until the process dies. ReadSlice fails
+// with ErrBufferFull instead of growing, which is what makes the accounting
+// possible.
+func readLine(br *bufio.Reader, limit int) (string, error) {
+	var line strings.Builder
+	for {
+		chunk, err := br.ReadSlice('\n')
+		if line.Len()+len(chunk) > limit {
+			return "", fmt.Errorf("%w: no newline in %d bytes", errFrameTooLarge, line.Len()+len(chunk))
+		}
+		line.Write(chunk)
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		return line.String(), err
 	}
 }
 

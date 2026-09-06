@@ -158,6 +158,54 @@ func TestStreamHandlesOversizedFrame(t *testing.T) {
 	}
 }
 
+// TestStreamAbandonsAnEndlessFrame is the other half of the bufio.Reader
+// decision: dropping Scanner removed the silent 64KB truncation but put
+// nothing in its place, and neither ReadString nor a sized bufio.Reader caps
+// anything - the size is only the starting buffer. A peer that writes bytes
+// and never a newline, or data: lines and never the blank line that ends the
+// frame, would be buffered until the daemon was OOM-killed. Past the cap the
+// frame is abandoned and the connection recycled, which the next connect's
+// resync makes good.
+func TestStreamAbandonsAnEndlessFrame(t *testing.T) {
+	cases := map[string]string{
+		"no newline":   strings.Repeat("x", 64<<10),
+		"no frame end": "data: " + strings.Repeat("x", 64<<10) + "\n",
+	}
+	for name, chunk := range cases {
+		t.Run(name, func(t *testing.T) {
+			var reqs atomic.Int32
+			srv := streamServer(t, func(w http.ResponseWriter, f http.Flusher, r *http.Request) {
+				reqs.Add(1)
+				// Twice the cap and then silence, so an unbounded reader
+				// stalls here rather than eating the machine.
+				for sent := 0; sent < 2*maxFrameBytes && r.Context().Err() == nil; sent += len(chunk) {
+					if _, err := fmt.Fprint(w, chunk); err != nil {
+						return
+					}
+					f.Flush()
+				}
+				<-r.Context().Done()
+			})
+
+			c := testClient(srv.URL)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				_ = c.Stream(ctx, StreamOptions{
+					Logger:            discardLogger(),
+					HealthyConnection: 10 * time.Millisecond,
+				}, func([]Event) {})
+			}()
+			t.Cleanup(func() { cancel(); <-done })
+
+			waitUntil(t, 25*time.Second, func() bool { return reqs.Load() >= 2 },
+				"the reader to give up on a frame that never ends")
+		})
+	}
+}
+
 // TestStreamSendsNoLastEventID locks in a deliberate decision: the caller
 // resyncs from the bridge on every connect, which is authoritative. Asking the
 // bridge to replay history as well would deliver stale events that are
@@ -207,10 +255,6 @@ func TestStreamSendsNoLastEventID(t *testing.T) {
 // failures drives a long-running daemon to the 10-minute retry cap, so it goes
 // deaf for ten minutes after each of the bridge's routine drops.
 func TestBackoffResetsAfterHealthyConnection(t *testing.T) {
-	prev := healthyConnection
-	healthyConnection = 50 * time.Millisecond
-	t.Cleanup(func() { healthyConnection = prev })
-
 	var mu sync.Mutex
 	var connects []time.Time
 
@@ -218,14 +262,22 @@ func TestBackoffResetsAfterHealthyConnection(t *testing.T) {
 		mu.Lock()
 		connects = append(connects, time.Now())
 		mu.Unlock()
-		// Stay up comfortably past healthyConnection, then drop.
+		// Stay up comfortably past HealthyConnection, then drop.
 		time.Sleep(120 * time.Millisecond)
 	})
 
 	c := testClient(srv.URL)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	go func() { _ = c.Stream(ctx, StreamOptions{Logger: discardLogger()}, func([]Event) {}) }()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = c.Stream(ctx, StreamOptions{
+			Logger:            discardLogger(),
+			HealthyConnection: 50 * time.Millisecond,
+		}, func([]Event) {})
+	}()
+	t.Cleanup(func() { cancel(); <-done })
 
 	waitUntil(t, 5*time.Second, func() bool {
 		mu.Lock()
@@ -246,10 +298,6 @@ func TestBackoffResetsAfterHealthyConnection(t *testing.T) {
 // failure mode: a resync that fails once must not leave it attached to a
 // healthy connection with an empty cache, silently doing nothing forever.
 func TestOnConnectErrorDropsConnectionAndRetries(t *testing.T) {
-	prev := healthyConnection
-	healthyConnection = 10 * time.Millisecond
-	t.Cleanup(func() { healthyConnection = prev })
-
 	var mu sync.Mutex
 	connects := 0
 
@@ -265,9 +313,12 @@ func TestOnConnectErrorDropsConnectionAndRetries(t *testing.T) {
 	defer cancel()
 
 	var attempts atomic.Int32
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		_ = c.Stream(ctx, StreamOptions{
-			Logger: discardLogger(),
+			Logger:            discardLogger(),
+			HealthyConnection: 10 * time.Millisecond,
 			OnConnect: func(context.Context) error {
 				if attempts.Add(1) == 1 {
 					return errors.New("resync boom")
@@ -276,6 +327,7 @@ func TestOnConnectErrorDropsConnectionAndRetries(t *testing.T) {
 			},
 		}, func([]Event) {})
 	}()
+	t.Cleanup(func() { cancel(); <-done })
 
 	waitUntil(t, 8*time.Second, func() bool { return attempts.Load() >= 2 }, "a retry after the failed resync")
 
@@ -291,10 +343,6 @@ func TestOnConnectErrorDropsConnectionAndRetries(t *testing.T) {
 // TCP sees nothing wrong. Its default period is deliberately long - silence is
 // normal on this bridge - so this drives it with an explicit short one.
 func TestStreamWatchdogReconnectsOnSilence(t *testing.T) {
-	prev := healthyConnection
-	healthyConnection = 10 * time.Millisecond
-	t.Cleanup(func() { healthyConnection = prev })
-
 	var connects atomic.Int32
 	srv := streamServer(t, func(w http.ResponseWriter, f http.Flusher, r *http.Request) {
 		connects.Add(1)
@@ -304,12 +352,16 @@ func TestStreamWatchdogReconnectsOnSilence(t *testing.T) {
 	c := testClient(srv.URL)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		_ = c.Stream(ctx, StreamOptions{
-			Logger:      discardLogger(),
-			ReadTimeout: 90 * time.Millisecond,
+			Logger:            discardLogger(),
+			ReadTimeout:       90 * time.Millisecond,
+			HealthyConnection: 10 * time.Millisecond,
 		}, func([]Event) {})
 	}()
+	t.Cleanup(func() { cancel(); <-done })
 
 	waitUntil(t, 8*time.Second, func() bool { return connects.Load() >= 2 },
 		"the watchdog to tear down a wedged connection")
@@ -358,10 +410,6 @@ func waitUntil(t *testing.T, timeout time.Duration, cond func() bool, what strin
 // bounded by nothing else. Arming afterwards left the daemon deaf forever with
 // no log line and no reconnect.
 func TestStreamWatchdogArmedBeforeRequest(t *testing.T) {
-	prev := healthyConnection
-	healthyConnection = 10 * time.Millisecond
-	t.Cleanup(func() { healthyConnection = prev })
-
 	// Deliberately not streamServer: this handler never writes headers at all.
 	var reqs atomic.Int32
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
@@ -377,8 +425,9 @@ func TestStreamWatchdogArmedBeforeRequest(t *testing.T) {
 	go func() {
 		defer close(done)
 		_ = c.Stream(ctx, StreamOptions{
-			Logger:      discardLogger(),
-			ReadTimeout: 90 * time.Millisecond,
+			Logger:            discardLogger(),
+			ReadTimeout:       90 * time.Millisecond,
+			HealthyConnection: 10 * time.Millisecond,
 		}, func([]Event) {})
 	}()
 	t.Cleanup(func() { cancel(); <-done })
@@ -393,10 +442,6 @@ func TestStreamWatchdogArmedBeforeRequest(t *testing.T) {
 // pipe and the watchdog recovers nothing. Counting accepted connections rather
 // than requests is what tells the two apart.
 func TestStreamWatchdogOpensANewConnection(t *testing.T) {
-	prev := healthyConnection
-	healthyConnection = 10 * time.Millisecond
-	t.Cleanup(func() { healthyConnection = prev })
-
 	var conns atomic.Int32
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -422,8 +467,9 @@ func TestStreamWatchdogOpensANewConnection(t *testing.T) {
 	go func() {
 		defer close(done)
 		_ = c.Stream(ctx, StreamOptions{
-			Logger:      discardLogger(),
-			ReadTimeout: 90 * time.Millisecond,
+			Logger:            discardLogger(),
+			ReadTimeout:       90 * time.Millisecond,
+			HealthyConnection: 10 * time.Millisecond,
 		}, func([]Event) {})
 	}()
 	t.Cleanup(func() { cancel(); <-done })
@@ -460,10 +506,6 @@ func TestStreamGivesUpOnPermanentRejection(t *testing.T) {
 // to surface as an error so the caller can rediscover, rather than being
 // retried at the old address until someone edits the credentials file.
 func TestStreamGivesUpAfterMaxConsecutiveFailures(t *testing.T) {
-	prev := healthyConnection
-	healthyConnection = time.Hour // nothing counts as a healthy connection
-	t.Cleanup(func() { healthyConnection = prev })
-
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "busy", http.StatusServiceUnavailable)
 	}))
@@ -476,6 +518,8 @@ func TestStreamGivesUpAfterMaxConsecutiveFailures(t *testing.T) {
 	err := c.Stream(ctx, StreamOptions{
 		Logger:                 discardLogger(),
 		MaxConsecutiveFailures: 2,
+		// Nothing counts as a healthy connection, so every drop counts.
+		HealthyConnection: time.Hour,
 	}, func([]Event) {})
 	if !errors.Is(err, ErrStreamUnreachable) {
 		t.Fatalf("want ErrStreamUnreachable, got %v", err)

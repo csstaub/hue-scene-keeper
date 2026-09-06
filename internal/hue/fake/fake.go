@@ -300,11 +300,20 @@ func (b *Bridge) broadcast(frame string) {
 		subs = append(subs, s)
 	}
 	b.mu.Unlock()
+	// One timer for the whole fan-out, reset per subscriber. time.After here
+	// would leave a live two-second timer behind for every subscriber of
+	// every frame, which a test that publishes in a loop accumulates. No
+	// drain after Stop: since Go 1.23 a reset timer cannot deliver a stale
+	// value.
+	stuck := time.NewTimer(2 * time.Second)
+	defer stuck.Stop()
 	for _, s := range subs {
+		stuck.Stop()
+		stuck.Reset(2 * time.Second)
 		select {
 		case s.frames <- frame:
 		case <-s.quit:
-		case <-time.After(2 * time.Second):
+		case <-stuck.C:
 			b.fail("fake bridge: subscriber did not consume event frame")
 		}
 	}
