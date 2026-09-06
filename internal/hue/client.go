@@ -237,18 +237,39 @@ func matchPin(have, got string) error {
 		ErrPinMismatch, have, got)
 }
 
-// limiter is a token bucket with no burst allowance. It spaces requests evenly.
+// limiterBurst is how many requests may leave back to back after idle time
+// before the limiter starts spacing them out.
+//
+// Small on purpose. The limiter is the backstop under the 10s recall floor,
+// and its worst case per second is burst + rate: 7 at the defaults, still
+// under the ~10/s the bridge is documented to take. Three covers the shape
+// that actually hurts - a power-restore lookup GET followed a coalesce window
+// later by the recall PUT it triggered, with one token spare for a second
+// room's lookup landing in the same moment. Anything larger buys nothing that
+// shows up in a trace and eats into the backstop.
+const limiterBurst = 3
+
+// limiter is a token bucket. Up to burst requests that find idle capacity
+// leave immediately; everything past that is spaced one interval apart, so
+// the sustained rate never exceeds the configured cap.
 type limiter struct {
 	mu       sync.Mutex
 	interval time.Duration
+	burst    int
 	next     time.Time
 }
 
-func newLimiter(perSecond float64) *limiter {
+func newLimiter(perSecond float64, burst int) *limiter {
 	if perSecond <= 0 {
 		perSecond = 4
 	}
-	return &limiter{interval: time.Duration(float64(time.Second) / perSecond)}
+	if burst < 1 {
+		burst = 1
+	}
+	return &limiter{
+		interval: time.Duration(float64(time.Second) / perSecond),
+		burst:    burst,
+	}
 }
 
 func (l *limiter) wait(ctx context.Context) error {
@@ -259,8 +280,14 @@ func (l *limiter) wait(ctx context.Context) error {
 	}
 	l.mu.Lock()
 	now := time.Now()
-	if l.next.Before(now) {
-		l.next = now
+	// next may lag now by up to burst-1 intervals: that lag is the bucket.
+	// Each of the burst requests that finds it sees a non-positive delay and
+	// leaves at once, still advancing next by an interval, so the one after
+	// them waits. Under sustained load next stays ahead of now, the clamp
+	// never applies, and this is exactly the burstless limiter it used to be.
+	// A burst of 1 makes the floor now itself, which is the old behavior.
+	if floor := now.Add(-time.Duration(l.burst-1) * l.interval); l.next.Before(floor) {
+		l.next = floor
 	}
 	delay := l.next.Sub(now)
 	reserved := l.next.Add(l.interval)
@@ -289,8 +316,9 @@ func (l *limiter) wait(ctx context.Context) error {
 // It only rolls back when l.next is still exactly where this caller left it,
 // meaning it was the last to reserve. If someone queued behind it in the
 // meantime, their slot was picked assuming this one was taken. Subtracting an
-// interval now would pull them forward into a gap they are already waiting out.
-// Two requests back to back, which is the one thing the limiter prevents.
+// interval now would pull them forward into a gap they are already waiting
+// out: two requests back to back that the bucket never earned, which is
+// exactly what the limiter exists to prevent.
 func (l *limiter) release(reserved time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -401,7 +429,7 @@ func New(o Options) *Client {
 		// indefinitely. Per-request deadlines come from the context instead.
 		// do() derives one from c.timeout, and Stream deliberately does not.
 		http:    &http.Client{Transport: transport},
-		lim:     newLimiter(o.RequestsPerSecond),
+		lim:     newLimiter(o.RequestsPerSecond, limiterBurst),
 		pin:     pin,
 		timeout: timeout,
 		log:     log,

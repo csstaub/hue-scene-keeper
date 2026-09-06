@@ -24,7 +24,9 @@ import (
 // mid-wait silently delays every request behind it by a full interval, and
 // under a whole-house restore those cancellations arrive in bursts.
 func TestLimiterReturnsCanceledReservation(t *testing.T) {
-	l := newLimiter(10) // 100ms apart
+	// Burst 1, so the second wait genuinely queues; with tokens in the bucket
+	// it would return at once and never be canceled mid-wait.
+	l := newLimiter(10, 1) // 100ms apart
 
 	if err := l.wait(context.Background()); err != nil {
 		t.Fatalf("first wait: %v", err)
@@ -55,7 +57,7 @@ func TestLimiterReturnsCanceledReservation(t *testing.T) {
 // it. Rolling back then would pull that caller forward into a gap it is still
 // waiting out, putting two requests on the wire back to back.
 func TestLimiterKeepsLaterReservationOnRelease(t *testing.T) {
-	l := newLimiter(10)
+	l := newLimiter(10, 1)
 	mine := time.Now().Add(l.interval)
 	theirs := mine.Add(l.interval)
 	l.next = theirs
@@ -71,7 +73,9 @@ func TestLimiterKeepsLaterReservationOnRelease(t *testing.T) {
 // already-canceled context must not spend a slot on a request it will never
 // send.
 func TestLimiterRejectsDeadContextWithoutReserving(t *testing.T) {
-	l := newLimiter(10)
+	// Burst 1 keeps the assertion sharp: with tokens to spare, the follow-up
+	// wait would be fast even if the dead context had wrongly spent a slot.
+	l := newLimiter(10, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -85,6 +89,96 @@ func TestLimiterRejectsDeadContextWithoutReserving(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 30*time.Millisecond {
 		t.Fatalf("waited %s behind a request that was never sent", elapsed)
+	}
+}
+
+// TestLimiterAllowsBurstThenSpaces is the burst contract: requests that find
+// idle capacity leave at once, up to the burst, and the one after them waits a
+// full interval. Without the second half this would pass with no limiter at
+// all.
+func TestLimiterAllowsBurstThenSpaces(t *testing.T) {
+	l := newLimiter(10, 3) // 100ms apart, 3 tokens
+
+	start := time.Now()
+	for i := range 3 {
+		if err := l.wait(context.Background()); err != nil {
+			t.Fatalf("burst wait %d: %v", i, err)
+		}
+	}
+	if elapsed := time.Since(start); elapsed > 30*time.Millisecond {
+		t.Fatalf("burst of 3 took %s; it should not have queued at all", elapsed)
+	}
+
+	if err := l.wait(context.Background()); err != nil {
+		t.Fatalf("post-burst wait: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < 70*time.Millisecond {
+		t.Fatalf("request after the burst left at %s; the bucket handed out more than it holds", elapsed)
+	}
+}
+
+// TestLimiterBurstDoesNotRaiseSustainedRate. The burst is start-up capital,
+// not income: once it is spent, requests space out at exactly the configured
+// interval, so a backlog of N costs (N - burst) intervals no matter how it
+// arrives.
+func TestLimiterBurstDoesNotRaiseSustainedRate(t *testing.T) {
+	l := newLimiter(20, 2) // 50ms apart, 2 tokens
+
+	start := time.Now()
+	for i := range 5 {
+		if err := l.wait(context.Background()); err != nil {
+			t.Fatalf("wait %d: %v", i, err)
+		}
+	}
+	// 2 immediate + 3 spaced = 150ms minimum.
+	if elapsed := time.Since(start); elapsed < 120*time.Millisecond {
+		t.Fatalf("5 requests through a 2-token bucket took %s; the rate cap did not hold", elapsed)
+	}
+}
+
+// TestLimiterBurstCoversLookupRecallPair is the trace that motivated the
+// burst: a power-restore lookup GET, a coalesce window of quiet shorter than
+// the interval, then the recall PUT. With one token still in the bucket the
+// PUT must not inherit the tail of the GET's spacing, which is exactly what
+// it did when the bucket held one.
+func TestLimiterBurstCoversLookupRecallPair(t *testing.T) {
+	l := newLimiter(10, 2) // 100ms apart, 2 tokens
+
+	if err := l.wait(context.Background()); err != nil {
+		t.Fatalf("first wait: %v", err)
+	}
+	time.Sleep(40 * time.Millisecond)
+
+	start := time.Now()
+	if err := l.wait(context.Background()); err != nil {
+		t.Fatalf("second wait: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 30*time.Millisecond {
+		t.Fatalf("second request waited %s with a token still in the bucket", elapsed)
+	}
+}
+
+// TestLimiterRefillsWhileIdle: a drained bucket earns its capacity back from
+// idle time, one interval per token, so a later isolated request is not still
+// paying for a burst that ended long ago.
+func TestLimiterRefillsWhileIdle(t *testing.T) {
+	l := newLimiter(10, 2) // 100ms apart, 2 tokens
+
+	for i := range 2 {
+		if err := l.wait(context.Background()); err != nil {
+			t.Fatalf("drain wait %d: %v", i, err)
+		}
+	}
+	// The drain pushed next two intervals out; sleeping past that point means
+	// at least one token has come back.
+	time.Sleep(250 * time.Millisecond)
+
+	start := time.Now()
+	if err := l.wait(context.Background()); err != nil {
+		t.Fatalf("wait after idle: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 30*time.Millisecond {
+		t.Fatalf("waited %s after idle time had refilled the bucket", elapsed)
 	}
 }
 

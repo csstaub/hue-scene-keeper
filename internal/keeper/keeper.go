@@ -58,7 +58,10 @@ const recallQueue = 256
 //
 // The delays are fixed rather than jittered. The client's rate limiter
 // already spaces retries out, so a house-wide wave of them queues rather
-// than collides.
+// than collides. The limiter's burst allowance dents that only slightly: the
+// first few retries of a wave can land together, but the burst is capped at
+// limiterBurst and a handful of concurrent requests is nothing to a LAN
+// bridge, so jitter still buys nothing here.
 var recallBackoff = []time.Duration{time.Second, 3 * time.Second}
 
 // drainGrace bounds the shutdown drain: how long dispatch may go on
