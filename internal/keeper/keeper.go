@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"slices"
 	"sort"
 	"strings"
@@ -129,10 +130,22 @@ type pendingRecall struct {
 	// The suppression state to put back if the bridge refuses this recall.
 	// It has to be carried on the entry because arming and finding out are no
 	// longer the same moment - a request sits on the wire in between.
+	//
+	// prevSuppress covers every group commit armed, which for a zone recall is
+	// more than one; armedUntil is the deadline it wrote to all of them, so
+	// rollback can tell its own window from a newer one.
 	prevRecall   time.Time
 	hadRecall    bool
-	prevSuppress time.Time
-	hadSuppress  bool
+	armedUntil   time.Time
+	prevSuppress []groupSuppression
+}
+
+// groupSuppression is one group's suppression deadline as commit found it,
+// kept so rollback can put back exactly what was overwritten.
+type groupSuppression struct {
+	groupID string
+	until   time.Time
+	had     bool
 }
 
 // skipsOnCheck reports whether commit's "is any light still on" veto does not
@@ -201,6 +214,14 @@ func New(client *hue.Client, reg *registry.Registry, cfg *config.Config, log *sl
 	if log == nil {
 		log = slog.Default()
 	}
+	// A nil config is a caller's mistake, but the dispatch goroutine is the
+	// wrong place to find it out: it panics there seconds later, on a stack
+	// that says nothing about who built the Keeper. Falling back to the
+	// defaults is not papering over a misconfiguration - they are the very
+	// settings a missing config file yields, which is a supported state.
+	if cfg == nil {
+		cfg = config.Default()
+	}
 	return &Keeper{
 		client:        client,
 		reg:           reg,
@@ -241,17 +262,18 @@ func (k *Keeper) Run(ctx context.Context) error {
 	// "nothing of mine is still running" - including the network calls a
 	// power-restore lookup may be part-way through.
 	var workers sync.WaitGroup
-	start := func(fn func(context.Context)) {
+	start := func(name string, fn func(context.Context)) {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
+			defer k.logPanic(name)
 			fn(ctx)
 		}()
 	}
-	start(k.dispatch)
-	start(k.sender)
+	start("dispatch", k.dispatch)
+	start("sender", k.sender)
 	for range maxDeviceLookups {
-		start(k.lookupWorker)
+		start("lookup", k.lookupWorker)
 	}
 
 	err := k.client.Stream(ctx, hue.StreamOptions{
@@ -262,6 +284,27 @@ func (k *Keeper) Run(ctx context.Context) error {
 
 	workers.Wait()
 	return err
+}
+
+// logPanic reports a panic on one of Run's goroutines through the daemon's own
+// logger, naming which one it was, and then lets it carry on unwinding.
+//
+// It deliberately does not absorb the panic. Every one of these goroutines is
+// load-bearing: dispatch is where recalls are decided at all, and a lookup
+// worker that dies mid-item leaves its group marked busy forever, so its room
+// never gets another power-restore lookup. Swallowing the panic would leave the
+// daemon running, logging nothing further, and quietly doing none of that -
+// exactly the failure the stream's give-up behaviour exists to avoid. Dying is
+// what gets the service manager to restart us; the log line is so the next
+// person knows which goroutine went and why.
+func (k *Keeper) logPanic(name string) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	k.log.Error("keeper goroutine panicked",
+		"goroutine", name, "panic", r, "stack", string(debug.Stack()))
+	panic(r)
 }
 
 // onConnect resyncs after every (re)connection and works out what we missed.
@@ -817,6 +860,15 @@ func (k *Keeper) lookupWorker(ctx context.Context) {
 // event stream.
 func (k *Keeper) runLookup(ctx context.Context, item deviceLookup) {
 	for _, id := range item.lightIDs {
+		// Stop at the first sign of shutdown rather than walking the rest of
+		// the group. The remaining reads cost little by then - the client's
+		// rate limiter refuses a request on a dead context before it reserves
+		// a slot or opens a connection - but a worker has no business still
+		// working through a list on behalf of a dispatch goroutine that has
+		// gone, and this is the only place that says so.
+		if ctx.Err() != nil {
+			return
+		}
 		light, err := k.client.GetLight(ctx, id)
 		if err != nil {
 			if ctx.Err() == nil {
@@ -955,9 +1007,9 @@ func (k *Keeper) commit(p *pendingRecall) bool {
 	// on the moment it accepts the recall, and those on-events would
 	// otherwise come straight back at us as fresh triggers.
 	p.prevRecall, p.hadRecall = k.lastRecall[r.groupID]
-	p.prevSuppress, p.hadSuppress = k.suppressUntil[r.groupID]
+	p.armedUntil = now.Add(cooldown)
+	p.prevSuppress = k.armSuppression(r.groupID, p.armedUntil)
 	k.lastRecall[r.groupID] = now
-	k.suppressUntil[r.groupID] = now.Add(cooldown)
 
 	select {
 	case k.sendQ <- p:
@@ -973,7 +1025,42 @@ func (k *Keeper) commit(p *pendingRecall) bool {
 	}
 }
 
-// rollback undoes what commit armed.
+// armSuppression opens the post-recall window on every group this recall's echo
+// can be attributed to, returning what each of them held so rollback can put it
+// back.
+//
+// The recalled group is not always the only one. The bridge lights every light
+// in the group and reports each as newly on, and those events are resolved back
+// through GroupForLight, which prefers a light's room over any zone it is in.
+// For a room recall that lands on the room itself and the set is a singleton.
+// For a zone recall it does not: a zone only wins for a light that is in no room
+// at all, so a zone mixing such a light with room-owning ones sends its echo
+// into those rooms - where, with no window of their own, every one of them
+// scheduled a recall of its own off the back of ours.
+//
+// lastRecall is deliberately not touched for the extra groups. It is the floor
+// on how often a room may be restyled, not an echo filter, and a room must not
+// lose its next ten seconds because a zone it lends a light to was recalled.
+func (k *Keeper) armSuppression(groupID string, until time.Time) []groupSuppression {
+	groups := []string{groupID}
+	for _, lightID := range k.reg.LightIDsInGroup(groupID) {
+		g, ok := k.reg.GroupForLight(lightID)
+		if !ok || slices.Contains(groups, g.ID) {
+			continue
+		}
+		groups = append(groups, g.ID)
+	}
+
+	prev := make([]groupSuppression, 0, len(groups))
+	for _, id := range groups {
+		was, had := k.suppressUntil[id]
+		prev = append(prev, groupSuppression{groupID: id, until: was, had: had})
+		k.suppressUntil[id] = until
+	}
+	return prev
+}
+
+// rollback undoes what commit armed, over exactly the set it armed.
 //
 // The bridge did not accept the recall, so no echo is coming and nothing must
 // be suppressed. Leaving the window armed would lock the room out for the whole
@@ -984,10 +1071,20 @@ func (k *Keeper) rollback(p *pendingRecall) {
 	} else {
 		delete(k.lastRecall, p.groupID)
 	}
-	if p.hadSuppress {
-		k.suppressUntil[p.groupID] = p.prevSuppress
-	} else {
-		delete(k.suppressUntil, p.groupID)
+	for _, s := range p.prevSuppress {
+		if cur, ok := k.suppressUntil[s.groupID]; ok && !cur.Equal(p.armedUntil) {
+			// Something newer armed this group after we did. inFlight rules
+			// that out for the recalled group, but not for the rooms a zone
+			// recall reaches: those are reachable from several groups at once,
+			// and putting our older value back would strip a window that is
+			// still holding an echo off.
+			continue
+		}
+		if s.had {
+			k.suppressUntil[s.groupID] = s.until
+		} else {
+			delete(k.suppressUntil, s.groupID)
+		}
 	}
 }
 
