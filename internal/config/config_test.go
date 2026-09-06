@@ -1,6 +1,7 @@
 package config
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -567,5 +568,196 @@ func TestNaNRequestsPerSecondFallsBackToTheDefault(t *testing.T) {
 	}
 	if got := cfg.Bridge.RequestsPerSecond; got != DefaultRequestsPerSecond {
 		t.Fatalf("want the default %g, got %g", float64(DefaultRequestsPerSecond), got)
+	}
+}
+
+// TestNegativeTuningIsRejected: every guard used to be `<= 0`, so a negative
+// was quietly replaced by the default and the daemon ran on numbers the config
+// never asked for. Zero cannot be told from absent without pointer fields, but
+// a negative is unambiguously a mistake, and this package rejects those.
+func TestNegativeTuningIsRejected(t *testing.T) {
+	for _, tc := range []struct{ body, want string }{
+		{"recall_cooldown: -5s\n", "recall_cooldown"},
+		{"min_recall_interval: -1m\n", "min_recall_interval"},
+		{"coalesce_window: -300ms\n", "coalesce_window"},
+		{"coalesce_max: -3s\n", "coalesce_max"},
+		{"bridge:\n  request_timeout: -10s\n", "bridge.request_timeout"},
+		{"bridge:\n  requests_per_second: -4\n", "bridge.requests_per_second"},
+	} {
+		t.Run(tc.want, func(t *testing.T) {
+			_, err := Load(writeConfig(t, tc.body))
+			if err == nil {
+				t.Fatalf("a negative %s must be rejected", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error should name %q: %v", tc.want, err)
+			}
+		})
+	}
+}
+
+// TestZeroTuningTakesTheDefault is the other half of the split: `0` still means
+// "default", not "off". Nothing here can distinguish a key written as 0 from
+// one that is absent, so the two must behave the same.
+func TestZeroTuningTakesTheDefault(t *testing.T) {
+	cfg, err := Load(writeConfig(t, `
+recall_cooldown: 0
+min_recall_interval: 0
+coalesce_window: 0
+coalesce_max: 0
+bridge:
+  requests_per_second: 0
+  request_timeout: 0
+`))
+	if err != nil {
+		t.Fatalf("zero should fill in the defaults, not fail: %v", err)
+	}
+	def := Default()
+	if cfg.RecallCooldown != def.RecallCooldown {
+		t.Errorf("recall_cooldown = %s", cfg.RecallCooldown.Duration())
+	}
+	if cfg.MinRecallInterval.Duration() != MinRecallFloor {
+		t.Errorf("min_recall_interval = %s", cfg.MinRecallInterval.Duration())
+	}
+	if cfg.CoalesceWindow != def.CoalesceWindow {
+		t.Errorf("coalesce_window = %s", cfg.CoalesceWindow.Duration())
+	}
+	if cfg.CoalesceMax != def.CoalesceMax {
+		t.Errorf("coalesce_max = %s", cfg.CoalesceMax.Duration())
+	}
+	if cfg.Bridge.RequestsPerSecond != DefaultRequestsPerSecond {
+		t.Errorf("requests_per_second = %g", cfg.Bridge.RequestsPerSecond)
+	}
+	if cfg.Bridge.RequestTimeout.Duration() != hue.DefaultRequestTimeout {
+		t.Errorf("request_timeout = %s", cfg.Bridge.RequestTimeout.Duration())
+	}
+}
+
+// TestSecondYAMLDocumentIsRejected: a decoder reads one document, so a stray
+// `---` turned the whole rest of the file into settings that did nothing at
+// all - the silent no-op KnownFields exists to prevent, one granularity up.
+func TestSecondYAMLDocumentIsRejected(t *testing.T) {
+	_, err := Load(writeConfig(t, "scene_name: a\n---\nscene_name: b\n"))
+	if err == nil {
+		t.Fatal("a second document must be an error, not silently dropped")
+	}
+	if !strings.Contains(err.Error(), "document") {
+		t.Errorf("error should explain what was ignored: %v", err)
+	}
+
+	// A single document that merely starts with the marker is ordinary YAML.
+	cfg, err := Load(writeConfig(t, "---\nscene_name: a\n"))
+	if err != nil {
+		t.Fatalf("a leading --- is one document: %v", err)
+	}
+	if cfg.SceneName != "a" {
+		t.Errorf("scene name = %q", cfg.SceneName)
+	}
+}
+
+// TestCleanAddressRejectsBadHostsAndPorts: everything CleanAddress lets past is
+// spliced straight into "https://" + addr, so anything it fails to catch comes
+// back as a net/url error naming no config key - the "baffling errors much
+// later" the function exists to prevent.
+func TestCleanAddressRejectsBadHostsAndPorts(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		addr string
+		want string // empty means "expect an error"
+	}{
+		{name: "plain ipv4", addr: "192.168.1.42", want: "192.168.1.42"},
+		{name: "ipv4 with port", addr: "192.168.1.42:443", want: "192.168.1.42:443"},
+		{name: "hostname", addr: "hue-bridge.local", want: "hue-bridge.local"},
+		{name: "bracketed ipv6 with port", addr: "[2001:db8::1]:443", want: "[2001:db8::1]:443"},
+		{name: "bare ipv6 gets bracketed", addr: "2001:db8::1", want: "[2001:db8::1]"},
+		{name: "words", addr: "hello world"},
+		{name: "port too high", addr: "192.168.1.42:99999"},
+		{name: "port zero", addr: "192.168.1.42:0"},
+		{name: "negative port", addr: "192.168.1.42:-1"},
+		{name: "empty port", addr: "192.168.1.42:"},
+		{name: "hostname with a space and a port", addr: "my bridge:443"},
+		{name: "empty label", addr: "hue..local"},
+		{name: "trailing dash", addr: "hue-.local"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := CleanAddress(tc.addr)
+			if tc.want == "" {
+				if err == nil {
+					t.Fatalf("CleanAddress(%q) = %q, want an error", tc.addr, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("CleanAddress(%q): %v", tc.addr, err)
+			}
+			if got != tc.want {
+				t.Errorf("CleanAddress(%q) = %q, want %q", tc.addr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBlankExclusionEntriesAreReported: a blank entry protects nothing, and
+// used to be dropped before the matching loop, so it reached neither Unmatched
+// nor Ineffective. In the one package that reports every inert config line,
+// that was the exception.
+func TestBlankExclusionEntriesAreReported(t *testing.T) {
+	cfg := Default()
+	cfg.Exclude.Rooms = []string{"  "}
+	cfg.Exclude.Lights = []string{""}
+
+	ex := ResolveExclusions(cfg, testLookup())
+
+	if len(ex.Unmatched) != 2 {
+		t.Fatalf("both blank entries should be reported, got %v", ex.Unmatched)
+	}
+	for _, want := range []string{"exclude.lights", "exclude.rooms"} {
+		found := false
+		for _, entry := range ex.Unmatched {
+			if strings.Contains(entry, want) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("no diagnostic for %s in %v", want, ex.Unmatched)
+		}
+	}
+}
+
+// TestLooseCredentialsPermissionsAreWarnedAbout: Save is meticulous about
+// 0600, but a file restored from a backup or written by an older version can
+// arrive at 0644, and loading the bridge's application key out of a
+// world-readable file in silence is the one thing this package would not say.
+func TestLooseCredentialsPermissionsAreWarnedAbout(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "credentials.json")
+	if err := os.WriteFile(path, []byte(`{"app_key":"secret"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var logged strings.Builder
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	creds, err := LoadCredentials(path)
+	if err != nil {
+		t.Fatalf("a loose mode is a warning, not a failure: %v", err)
+	}
+	if creds.AppKey != "secret" {
+		t.Fatalf("app key = %q", creds.AppKey)
+	}
+	if !strings.Contains(logged.String(), "readable by other users") {
+		t.Fatalf("0644 credentials should be warned about, log was %q", logged.String())
+	}
+
+	logged.Reset()
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadCredentials(path); err != nil {
+		t.Fatal(err)
+	}
+	if logged.Len() != 0 {
+		t.Errorf("a 0600 file must be silent, got %q", logged.String())
 	}
 }

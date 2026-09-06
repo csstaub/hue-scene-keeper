@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 )
@@ -24,6 +25,14 @@ var ErrNoCredentials = errors.New("no credentials found; run `hue-scene-keeper a
 
 // LoadCredentials reads the credentials file. A missing file yields an empty,
 // saveable Credentials rather than an error, so `auth` can populate it.
+//
+// A file other users can read is warned about, not rejected. Save is
+// meticulous about 0600, but a file restored from a backup, copied between
+// machines, or written by an older version arrives at whatever mode it arrives
+// at, and the application key it holds is the whole of the daemon's authority
+// over the bridge. Refusing to start would strand a working daemon over
+// something one chmod fixes, so this follows ssh's lead and says so loudly
+// instead.
 func LoadCredentials(path string) (*Credentials, error) {
 	creds := &Credentials{path: path}
 	raw, err := os.ReadFile(path)
@@ -32,6 +41,10 @@ func LoadCredentials(path string) (*Credentials, error) {
 			return creds, nil
 		}
 		return nil, err
+	}
+	if info, err := os.Stat(path); err == nil && info.Mode().Perm()&0o077 != 0 {
+		slog.Warn("credentials file is readable by other users; the bridge application key is a secret",
+			"path", path, "mode", fmt.Sprintf("%04o", info.Mode().Perm()), "want", "0600")
 	}
 	if err := json.Unmarshal(raw, creds); err != nil {
 		return nil, fmt.Errorf("parse %s: %w; delete the file and re-run `hue-scene-keeper auth` to pair again", path, err)
