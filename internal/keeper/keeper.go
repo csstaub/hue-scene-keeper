@@ -114,7 +114,12 @@ type pendingRecall struct {
 	seq uint64
 
 	// fireAt is the deadline; activity in the group pushes it out. hardAt is
-	// where that pushing stops, fixed when the entry is created.
+	// where that pushing stops, fixed when the entry is created - with one
+	// exception, in drain: an entry deferred because its group's previous
+	// recall is still on the wire carries hardAt forward with it. So
+	// coalesce_max caps the wait for one round of coalescing, not the total
+	// time a group can spend pending. See the deferral in drain for why that
+	// is the lesser of the two evils.
 	fireAt time.Time
 	hardAt time.Time
 
@@ -762,6 +767,18 @@ func (k *Keeper) drain(pending map[string]*pendingRecall) {
 			// for its outcome rather than stacking a second one behind it,
 			// which would leave two entries fighting over one group's
 			// suppression state.
+			//
+			// Carrying hardAt forward past its original value is deliberate,
+			// and it is the one place coalesce_max does not hold. Leaving it
+			// behind would put fireAt beyond it, which makes extend a
+			// permanent no-op for this entry: it would then fire one window
+			// after the recall ahead of it lands, ignoring activity still
+			// arriving. That is the half-styled room coalesce_window exists to
+			// prevent, and it is not a rare shape - a burst turning lights on
+			// is what puts a recall on the wire in the first place, so "recall
+			// in flight while the burst continues" is the ordinary case. The
+			// overrun this costs is bounded by one round trip per deferral,
+			// and an excluded light can no longer contribute to it at all.
 			p.fireAt = schedNow().Add(k.coalesceWindow())
 			p.hardAt = later(p.hardAt, p.fireAt)
 			continue
