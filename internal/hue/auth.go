@@ -54,7 +54,11 @@ func (c *Client) Pair(ctx context.Context, appName string) (string, error) {
 	case r.Error != nil && r.Error.Type == 101:
 		return "", ErrLinkButton
 	case r.Error != nil:
-		return "", fmt.Errorf("bridge refused pairing: %s", r.Error.Description)
+		// A refusal the bridge spelled out - the whitelist is full, the body
+		// was wrong - carried in a 200 like every other CLIP application
+		// error, so it classifies as one and PairWithRetry stops on it
+		// instead of polling out the rest of the window.
+		return "", &EnvelopeError{Method: http.MethodPost, Path: "/api", Description: r.Error.Description}
 	default:
 		return "", errors.New("unexpected pairing response from bridge")
 	}
@@ -62,26 +66,52 @@ func (c *Client) Pair(ctx context.Context, appName string) (string, error) {
 
 // PairWithRetry polls Pair until the link button is pressed or ctx expires.
 // notify, if non-nil, is called before each attempt with the attempt number.
+//
+// Transient failures keep the poll going. The pairing window is the couple of
+// minutes in which the user is standing at the bridge pressing its button, so
+// a 503 from a bridge that is busy, or a connection reset because they just
+// re-plugged it, is the likeliest error there is - and giving up on one cost
+// them the whole ceremony over again. Only a refusal that will not change on
+// its own, or ctx ending, stops the loop.
 func (c *Client) PairWithRetry(ctx context.Context, appName string, interval time.Duration, notify func(attempt int)) (string, error) {
 	if interval <= 0 {
 		interval = 2 * time.Second
 	}
+	// The last transient error, kept so that running out of time after two
+	// minutes of a refusing bridge does not report itself as the user failing
+	// to press a button. A later ErrLinkButton clears it: we reached the
+	// bridge after all, so the button really is what we are waiting on.
+	var lastErr error
+	giveUp := func(cause error) error {
+		if lastErr != nil {
+			return fmt.Errorf("gave up waiting for the link button: %w", lastErr)
+		}
+		return fmt.Errorf("timed out waiting for the link button: %w", cause)
+	}
+
 	for attempt := 1; ; attempt++ {
 		if notify != nil {
 			notify(attempt)
 		}
 		key, err := c.Pair(ctx, appName)
-		if err == nil {
+		switch {
+		case err == nil:
 			return key, nil
-		}
-		if !errors.Is(err, ErrLinkButton) {
+		case errors.Is(err, ErrLinkButton):
+			lastErr = nil
+		case Retryable(err):
+			lastErr = err
+		case ctx.Err() != nil:
+			// Time ran out inside an attempt rather than between two.
+			return "", giveUp(ctx.Err())
+		default:
 			return "", err
 		}
 		t := time.NewTimer(interval)
 		select {
 		case <-ctx.Done():
 			t.Stop()
-			return "", fmt.Errorf("timed out waiting for the link button: %w", ctx.Err())
+			return "", giveUp(ctx.Err())
 		case <-t.C:
 		}
 	}

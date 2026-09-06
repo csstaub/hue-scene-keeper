@@ -62,6 +62,43 @@ func (e *StatusError) Retryable() bool {
 	return false
 }
 
+// EnvelopeError is a refusal the bridge reported inside a 2xx response.
+//
+// CLIP v2 does not use status codes for most application-level failures: an
+// unknown scene id, a group that no longer exists, a body it will not accept
+// all come back as HTTP 200 with a populated errors array. Without a type of
+// its own such a refusal reached Retryable as a plain error and fell through
+// to "transient", so a scene deleted in the Hue app was recalled again through
+// the whole of recallBackoff - exactly what StatusError exists to prevent.
+type EnvelopeError struct {
+	Method      string
+	Path        string
+	Description string
+}
+
+func (e *EnvelopeError) Error() string {
+	return fmt.Sprintf("bridge refused %s %s: %s", e.Method, e.Path, e.Description)
+}
+
+// Retryable reports whether the refusal is worth sending again later.
+//
+// Always false. The bridge gives us no machine-readable code to sort these by
+// - only a human-readable description whose wording is not part of any
+// contract - and the failures it delivers this way are lookups and validation:
+// the resource is gone, the id is wrong, the payload is wrong. None of those
+// resolve by asking again, so the safe default is to surface the description
+// once rather than bury it under a backoff.
+func (e *EnvelopeError) Retryable() bool { return false }
+
+// envelopeError returns the bridge's first envelope error for a request, or
+// nil if it reported none.
+func envelopeError(method, path string, env Envelope) error {
+	if len(env.Errors) == 0 {
+		return nil
+	}
+	return &EnvelopeError{Method: method, Path: path, Description: env.Errors[0].Description}
+}
+
 // ErrRequestTimeout is returned when a request exceeds the client's
 // per-request timeout. It is distinct from the caller's context expiring:
 // a slow bridge is worth another try, a shutting-down caller is not.
@@ -70,9 +107,11 @@ var ErrRequestTimeout = errors.New("bridge request timed out")
 // Retryable reports whether an error from a Client call is worth retrying.
 //
 // A transport error - connection refused, reset, timed out - is transient by
-// nature, so anything that is not a StatusError and not a cancelled context
-// counts. The caller's own context errors do not: it is shutting down or gave
-// up, and there is nobody left to retry for.
+// nature, so anything that is not a refusal the bridge spelled out and not a
+// cancelled context counts. The bridge spells them out two ways, by status
+// code and inside a 2xx envelope, and both get to answer for themselves. The
+// caller's own context errors do not: it is shutting down or gave up, and
+// there is nobody left to retry for.
 func Retryable(err error) bool {
 	if err == nil {
 		return false
@@ -93,6 +132,10 @@ func Retryable(err error) bool {
 	var se *StatusError
 	if errors.As(err, &se) {
 		return se.Retryable()
+	}
+	var ee *EnvelopeError
+	if errors.As(err, &ee) {
+		return ee.Retryable()
 	}
 	return true
 }
@@ -305,8 +348,29 @@ func (c *Client) Address() string { return c.addr }
 // Pin returns the client's TLS pin state.
 func (c *Client) Pin() *Pin { return c.pin }
 
+// hostPort normalises a bridge address for splicing into a URL.
+//
+// An IPv6 literal has to be bracketed: net/url reads "https://fe80::1/..." as
+// a host of "fe80:" on port 1, which no amount of network will fix and which
+// surfaces as an error about a port the user never wrote. Everything else
+// - a hostname, an IPv4 literal, an address that already carries a port or
+// brackets - comes back unchanged, so it is safe to apply at every point a URL
+// is built.
+func hostPort(addr string) string {
+	if host, port, err := net.SplitHostPort(addr); err == nil {
+		return net.JoinHostPort(host, port)
+	}
+	// SplitHostPort refuses a bare IPv6 literal for having too many colons,
+	// which is precisely the case that needs the brackets. Anything already
+	// bracketed fails net.ParseIP and is left alone.
+	if ip := net.ParseIP(addr); ip != nil && ip.To4() == nil {
+		return "[" + addr + "]"
+	}
+	return addr
+}
+
 func (c *Client) url(path string) string {
-	return "https://" + c.addr + path
+	return "https://" + hostPort(c.addr) + path
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any) ([]byte, error) {
@@ -380,7 +444,8 @@ func truncate(s string, n int) string {
 
 // GetResource fetches every resource of a type, returning the raw entries.
 func (c *Client) GetResource(ctx context.Context, rtype string) ([]json.RawMessage, error) {
-	raw, err := c.do(ctx, http.MethodGet, "/clip/v2/resource/"+rtype, nil)
+	path := "/clip/v2/resource/" + rtype
+	raw, err := c.do(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -388,15 +453,16 @@ func (c *Client) GetResource(ctx context.Context, rtype string) ([]json.RawMessa
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return nil, fmt.Errorf("decode %s: %w", rtype, err)
 	}
-	if len(env.Errors) > 0 {
-		return nil, fmt.Errorf("bridge error reading %s: %s", rtype, env.Errors[0].Description)
+	if err := envelopeError(http.MethodGet, path, env); err != nil {
+		return nil, err
 	}
 	return env.Data, nil
 }
 
 // GetLight fetches a single light by id.
 func (c *Client) GetLight(ctx context.Context, id string) (Light, error) {
-	raw, err := c.do(ctx, http.MethodGet, "/clip/v2/resource/light/"+id, nil)
+	path := "/clip/v2/resource/light/" + id
+	raw, err := c.do(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return Light{}, err
 	}
@@ -404,8 +470,8 @@ func (c *Client) GetLight(ctx context.Context, id string) (Light, error) {
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return Light{}, err
 	}
-	if len(env.Errors) > 0 {
-		return Light{}, fmt.Errorf("bridge error reading light %s: %s", id, env.Errors[0].Description)
+	if err := envelopeError(http.MethodGet, path, env); err != nil {
+		return Light{}, err
 	}
 	if len(env.Data) == 0 {
 		return Light{}, fmt.Errorf("light %s not found", id)
@@ -420,7 +486,8 @@ func (c *Client) GetLight(ctx context.Context, id string) (Light, error) {
 // RecallSmartScene activates a smart scene, putting the room into its 24-hour
 // cycle. The bridge drives every subsequent transition on its own.
 func (c *Client) RecallSmartScene(ctx context.Context, id string) error {
-	raw, err := c.do(ctx, http.MethodPut, "/clip/v2/resource/smart_scene/"+id, RecallActivate())
+	path := "/clip/v2/resource/smart_scene/" + id
+	raw, err := c.do(ctx, http.MethodPut, path, RecallActivate())
 	if err != nil {
 		return err
 	}
@@ -428,8 +495,5 @@ func (c *Client) RecallSmartScene(ctx context.Context, id string) error {
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return fmt.Errorf("decode recall response: %w", err)
 	}
-	if len(env.Errors) > 0 {
-		return fmt.Errorf("bridge refused recall of smart scene %s: %s", id, env.Errors[0].Description)
-	}
-	return nil
+	return envelopeError(http.MethodPut, path, env)
 }
