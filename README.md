@@ -35,9 +35,14 @@ your config and credentials alone.
 Or just build the binary, on any platform:
 
 ```sh
-go tool mage go:build           # or: go tool mage go:dist   for all platforms
-sudo -E go tool mage go:install # /usr/local/bin/hue-scene-keeper
+go tool mage go:build     # or: go tool mage go:dist   for all platforms
+go tool mage go:install   # sudo-copies it to /usr/local/bin/hue-scene-keeper
 ```
+
+Run `go:install` as yourself, not under `sudo`. It compiles as you and asks for
+`sudo` only for the copy into `/usr/local/bin`; running the whole target as root
+would run the compiler as root too, and the root-owned entries it leaves in your
+build and module caches break every later build you make as yourself.
 
 ## Setup
 
@@ -138,10 +143,18 @@ only if you would rather not install a package:
 
 ```sh
 cp deploy/dev.staub.hue-scene-keeper.plist ~/Library/LaunchAgents/
+launchctl enable gui/$(id -u)/dev.staub.hue-scene-keeper
 launchctl bootstrap gui/$(id -u) \
   ~/Library/LaunchAgents/dev.staub.hue-scene-keeper.plist
 tail -f ~/Library/Logs/hue-scene-keeper.log
 ```
+
+The `enable` line matters and it has to come first. `hue-scene-keeper stop`
+writes the label into launchd's per-user disabled database to keep the agent
+stopped across logins, and that database outlives the plist — deleting the file
+does not clear it. Bootstrapping a label that is still on it fails with
+`Bootstrap failed: 5: Input/output error`, which says nothing about why.
+`launchctl print-disabled gui/$(id -u)` lists what is on it.
 
 The plist needs no editing. launchd does not expand variables in
 `StandardOutPath`, and an agent's working directory is `/` rather than your home
@@ -159,6 +172,20 @@ Pairing is the one thing the installer cannot do for you. Until you run
 `hue-scene-keeper auth`, `run` exits immediately and launchd retries it every 30
 seconds; once the credentials exist it picks them up on its own, with nothing to
 restart.
+
+**That self-recovery is launchd's, not systemd's.** systemd rate-limits
+restarts — ten in five minutes — so a unit enabled before pairing gives up in
+under a minute with `start-request-repeated-too-quickly` and stays failed. That
+limit is deliberate: without it an unrecoverable error would restart-loop into
+the journal forever. It does mean that if you enabled the unit first and paired
+afterwards, you have to clear the counter by hand:
+
+```sh
+sudo systemctl reset-failed hue-scene-keeper
+sudo systemctl start hue-scene-keeper
+```
+
+Pairing before `systemctl enable --now`, as above, avoids this entirely.
 
 ### Starting and stopping it
 

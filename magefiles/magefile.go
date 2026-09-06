@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -88,9 +89,15 @@ func Clean() error {
 
 // --- go: the Go toolchain --------------------------------------------------
 
-// Build compiles the binary for this machine.
+// Build compiles the binary for this machine. CGO_ENABLED=0 is not an
+// optimisation: it is what makes this binary the same shape as the ones
+// buildTo cross-compiles. A cgo build resolves hostnames through glibc's
+// getaddrinfo, which opens an AF_NETLINK socket that the systemd unit's
+// RestrictAddressFamilies does not allow, so cloud discovery would fail under
+// the unit on a host where DNS demonstrably works.
 func (Go) Build() error {
-	return sh.RunV("go", "build", "-ldflags", ldflags(), "-o", binary, mainPkg)
+	env := map[string]string{"CGO_ENABLED": "0"}
+	return sh.RunWithV(env, "go", "build", "-ldflags", ldflags(), "-o", binary, mainPkg)
 }
 
 // Test runs the test suite.
@@ -111,10 +118,32 @@ func (Go) Lint() error {
 	return sh.RunV("go", "tool", "-modfile=lint.mod", "golangci-lint", "run")
 }
 
-// Install builds the binary and installs it into /usr/local/bin.
+// Install builds the binary and installs it into /usr/local/bin. The compile
+// stays unprivileged and only the copy is elevated, so this target is run as
+// yourself: under `sudo go tool mage go:install` the dependency on Go.Build
+// re-runs the compiler as root, and with -E preserving HOME that leaves
+// root-owned entries in your build and module caches which every later
+// non-root build then fails on.
 func (Go) Install() error {
 	mg.Deps(Go.Build)
-	return sh.RunV("install", "-m0755", binary, filepath.Join("/usr/local/bin", binary))
+	dir := "/usr/local/bin"
+	// -d first: install refuses to write into a directory that does not exist,
+	// and on a fresh machine /usr/local/bin often does not.
+	if err := elevated("install", "-d", "-m0755", dir); err != nil {
+		return err
+	}
+	return elevated("install", "-m0755", binary, filepath.Join(dir, binary))
+}
+
+// elevated runs one command through sudo unless we are already root, or there
+// is no sudo to reach for. internal/service picks up sudo the same way.
+func elevated(args ...string) error {
+	if os.Geteuid() != 0 {
+		if sudo, err := exec.LookPath("sudo"); err == nil {
+			args = append([]string{sudo}, args...)
+		}
+	}
+	return sh.RunV(args[0], args[1:]...)
 }
 
 // Dist cross-compiles a static binary for every target platform.
@@ -212,7 +241,9 @@ func (Pkg) Build() error {
 	if err := os.MkdirAll(scripts, 0o755); err != nil {
 		return err
 	}
-	if err := sh.Run("lipo", "-create", "-output", filepath.Join(scripts, binary), amd64Bin, arm64Bin); err != nil {
+	// RunV, not Run: without the Xcode command line tools this is where the
+	// build stops, and a bare exit status says nothing about what to install.
+	if err := sh.RunV("lipo", "-create", "-output", filepath.Join(scripts, binary), amd64Bin, arm64Bin); err != nil {
 		return err
 	}
 	if err := os.Chmod(filepath.Join(scripts, binary), 0o755); err != nil {
@@ -269,8 +300,15 @@ func (Pkg) Uninstall() error {
 	if runtime.GOOS != "darwin" {
 		return fmt.Errorf("pkg:uninstall removes a macOS install; this is %s", runtime.GOOS)
 	}
+	target := fmt.Sprintf("gui/%d/%s", os.Getuid(), bundleID)
 	// Best effort: the agent may not be loaded, which is not a failure.
-	_ = sh.Run("launchctl", "bootout", fmt.Sprintf("gui/%d/%s", os.Getuid(), bundleID))
+	_ = sh.Run("launchctl", "bootout", target)
+	// `hue-scene-keeper stop` writes the label into launchd's per-user disabled
+	// database, and that database outlives the plist: booting out and deleting
+	// the file leaves the entry behind, so a later install by hand fails its
+	// bootstrap with "Bootstrap failed: 5: Input/output error" and nothing on
+	// disk explains why. Uninstalling has to take the label with it.
+	_ = sh.Run("launchctl", "enable", target)
 
 	return sh.RunV("sudo", "/bin/sh", "-c", strings.Join([]string{
 		"rm -f /Library/LaunchAgents/" + bundleID + ".plist",

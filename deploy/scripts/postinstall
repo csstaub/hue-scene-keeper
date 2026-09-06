@@ -42,8 +42,33 @@ CONSOLE_UID=$(/usr/bin/id -u "$CONSOLE_USER" 2>/dev/null || echo "")
 # `launchctl disable` or a legacy `launchctl unload -w`, and it stays there even
 # after the plist is deleted -- so with enable last, an install that hit a
 # disabled label could never recover on its own.
+#
+# Everything the package installs is already on disk by this point, and the
+# plist sets RunAtLoad, so failing to start the agent *now* is not a failed
+# install -- it is an install that starts at the next login. Neither launchctl
+# call may abort the script under `set -e`: the installer would report "The
+# installation failed" for a machine that is in fact correctly installed, and
+# the user would reinstall to fix nothing. The bootstrap is retried because
+# the common failure is a race: bootout returns before launchd has finished
+# tearing the old job down, and the bootstrap that follows lands on a label
+# that is still there.
 /bin/launchctl bootout "gui/$CONSOLE_UID/$LABEL" 2>/dev/null || true
-/bin/launchctl enable "gui/$CONSOLE_UID/$LABEL"
-/bin/launchctl bootstrap "gui/$CONSOLE_UID" "$PLIST"
+/bin/launchctl enable "gui/$CONSOLE_UID/$LABEL" || true
+
+attempt=1
+while [ "$attempt" -le 3 ]; do
+    if /bin/launchctl bootstrap "gui/$CONSOLE_UID" "$PLIST"; then
+        exit 0
+    fi
+    attempt=$((attempt + 1))
+    if [ "$attempt" -le 3 ]; then
+        /bin/sleep 1
+    fi
+done
+
+echo "hue-scene-keeper: installed, but the agent could not be started now." >&2
+echo "hue-scene-keeper: it starts at the next login, or start it by hand with:" >&2
+echo "  launchctl enable gui/$CONSOLE_UID/$LABEL" >&2
+echo "  launchctl bootstrap gui/$CONSOLE_UID $PLIST" >&2
 
 exit 0

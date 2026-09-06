@@ -8,10 +8,19 @@
   this plist needs no templating and every user gets their own log.
 
   Manual install:
-    go tool mage go:build && sudo -E go tool mage go:install
+    go tool mage go:install
     cp deploy/dev.staub.hue-scene-keeper.plist ~/Library/LaunchAgents/
+    launchctl enable gui/$(id -u)/dev.staub.hue-scene-keeper
     launchctl bootstrap gui/$(id -u) \
       ~/Library/LaunchAgents/dev.staub.hue-scene-keeper.plist
+
+  Run go:install as yourself and not under sudo: it builds as you and elevates
+  only the copy into /usr/local/bin, where sudo would re-run the compiler as
+  root. The `enable` is not decoration either. `hue-scene-keeper stop` writes
+  this label into launchd's per-user disabled database, which outlives the
+  plist, and bootstrapping a disabled label fails with "Bootstrap failed: 5:
+  Input/output error". List what is on it with:
+    launchctl print-disabled gui/$(id -u)
 
   Pair first:  hue-scene-keeper auth
   Logs:        tail -f ~/Library/Logs/hue-scene-keeper.log
