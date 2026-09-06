@@ -512,6 +512,47 @@ bridge:
 	}
 }
 
+// TestLogLevelIsNamedOrAbsent covers the three states log.level has. An absent
+// key names nothing, which is what leaves --log-level and its default in
+// charge. A name is parsed here rather than downstream. A name nothing parses
+// is a load error, because a level nobody understands means the debug output
+// the user came here to turn on never appears with nothing said about why.
+func TestLogLevelIsNamedOrAbsent(t *testing.T) {
+	cfg, err := Load(filepath.Join(t.TempDir(), "absent.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lvl, ok := cfg.LogLevel(); ok {
+		t.Errorf("a config with no log.level names %s, want no level at all", lvl)
+	}
+
+	cfg, err = Load(writeConfig(t, "log:\n  level: debug\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lvl, ok := cfg.LogLevel(); !ok || lvl != slog.LevelDebug {
+		t.Errorf("LogLevel() = %s, %v, want debug, true", lvl, ok)
+	}
+
+	// Whitespace and case, because the level is a hand-edited string and both
+	// slips read as the level they were meant to be.
+	cfg, err = Load(writeConfig(t, "log:\n  level: \" WARN \"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lvl, ok := cfg.LogLevel(); !ok || lvl != slog.LevelWarn {
+		t.Errorf("LogLevel() = %s, %v, want warn, true", lvl, ok)
+	}
+
+	_, err = Load(writeConfig(t, "log:\n  level: verbose\n"))
+	if err == nil {
+		t.Fatal("log.level: verbose loaded, want an error naming the key")
+	}
+	if !strings.Contains(err.Error(), "log.level") {
+		t.Errorf("error = %v, want it to name log.level", err)
+	}
+}
+
 // TestCoalesceMaxIsRaisedToTheWindow. A cap below the gap it caps would fire
 // every recall immediately, silently turning the debounce off. Raising it back
 // to the window is the closest honest reading of what was asked for.

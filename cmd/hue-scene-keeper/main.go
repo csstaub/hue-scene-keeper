@@ -50,6 +50,19 @@ type globals struct {
 	// At a path the user named, it is a typo. Carrying on with defaults would
 	// silently drop every exclusion they think is protecting a room.
 	configSet bool
+
+	// logLevelSet records that --log-level was given explicitly, which is what
+	// makes it beat the config file's log.level. Without it the two are
+	// indistinguishable here: an omitted flag and `--log-level=info` both
+	// arrive as "info", and the file could never lower the level at all.
+	logLevelSet bool
+
+	// levelVar is the level the handler consults per record, so the config
+	// file can move it after the logger already exists. It has to: the logger
+	// is built from the flags before any file is read, because most commands
+	// never read a config and a broken one must not stop `stop` from stopping
+	// the service.
+	levelVar *slog.LevelVar
 }
 
 // exitStatuser is an error that names the process's exit status itself. Its
@@ -126,6 +139,21 @@ func bindFlags(fs *flag.FlagSet, g *globals, def globals) {
 	fs.BoolVar(&g.resetPin, "reset-pin", def.resetPin, "auth only: forget the pinned bridge certificate and learn it again")
 }
 
+// noteExplicit records which flags were actually typed, for the two where an
+// omitted flag and one given at its default value have to be told apart. Both
+// flag passes visit it, and both only ever set, so a flag given before the
+// subcommand is not forgotten by the pass after it.
+func noteExplicit(g *globals) func(*flag.Flag) {
+	return func(f *flag.Flag) {
+		switch f.Name {
+		case "config":
+			g.configSet = true
+		case "log-level":
+			g.logLevelSet = true
+		}
+	}
+}
+
 func usageFor(fs *flag.FlagSet) func() {
 	return func() {
 		_, _ = fmt.Fprintf(fs.Output(), `%s - keep Hue rooms in their all-day smart scene
@@ -173,11 +201,7 @@ func run() error {
 		return silent(1)
 	}
 
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "config" {
-			g.configSet = true
-		}
-	})
+	fs.Visit(noteExplicit(&g))
 
 	command := "run"
 	args := fs.Args()
@@ -198,11 +222,7 @@ func run() error {
 			}
 			return silent(1)
 		}
-		sub.Visit(func(f *flag.Flag) {
-			if f.Name == "config" {
-				g.configSet = true
-			}
-		})
+		sub.Visit(noteExplicit(&g))
 		args = sub.Args()
 	}
 
@@ -212,10 +232,11 @@ func run() error {
 	}
 	defer closeLog()
 
-	log, err := newLogger(out, g.logFormat, g.logLevel)
+	log, levelVar, err := newLogger(out, g.logFormat, g.logLevel)
 	if err != nil {
 		return err
 	}
+	g.levelVar = levelVar
 	ctx, stop := signalContext(os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -302,12 +323,18 @@ func logOutput(g globals) (io.Writer, func(), error) {
 // Falling back silently means `--log-level=verbose` runs at info and the user
 // spends the next hour wondering where their debug output went. Every other
 // typo in this CLI is an error; these were the exception.
-func newLogger(w io.Writer, format, level string) (*slog.Logger, error) {
+func newLogger(w io.Writer, format, level string) (*slog.Logger, *slog.LevelVar, error) {
 	var lvl slog.Level
 	if err := lvl.UnmarshalText([]byte(level)); err != nil {
-		return nil, fmt.Errorf("--log-level %q: want debug, info, warn or error", level)
+		return nil, nil, fmt.Errorf("--log-level %q: want debug, info, warn or error", level)
 	}
-	opts := &slog.HandlerOptions{Level: lvl}
+	// A LevelVar rather than the level itself, so loadAll can hand the config
+	// file's log.level to a handler that already exists. The returned var is
+	// the only way to move it afterwards: the handler holds it as a Leveler
+	// and nothing else can reach it.
+	levelVar := new(slog.LevelVar)
+	levelVar.Set(lvl)
+	opts := &slog.HandlerOptions{Level: levelVar}
 	var handler slog.Handler
 	switch {
 	case strings.EqualFold(format, "json"):
@@ -315,11 +342,11 @@ func newLogger(w io.Writer, format, level string) (*slog.Logger, error) {
 	case strings.EqualFold(format, "text"):
 		handler = slog.NewTextHandler(w, opts)
 	default:
-		return nil, fmt.Errorf("--log-format %q: want text or json", format)
+		return nil, nil, fmt.Errorf("--log-format %q: want text or json", format)
 	}
 	log := slog.New(handler)
 	slog.SetDefault(log)
-	return log, nil
+	return log, levelVar, nil
 }
 
 // resolveAddress picks the bridge address from, in order: the flag, the config
@@ -434,11 +461,31 @@ func loadAll(g globals) (*config.Config, *config.Credentials, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	applyConfigLogLevel(g, cfg)
 	creds, err := config.LoadCredentials(g.statePath)
 	if err != nil {
 		return nil, nil, err
 	}
 	return cfg, creds, nil
+}
+
+// applyConfigLogLevel moves the live log level to what the config file asks
+// for. Here, rather than beside the other flag handling, because this is the
+// first point at which a config file has been read at all, and every command
+// that reads one comes through loadAll before it logs its first line.
+//
+// An explicit --log-level wins. A flag typed for this one run is the more
+// specific instruction, and it is what a `--log-level=debug` run of a daemon
+// whose file says `warn` has to mean. An absent key changes nothing, which is
+// what leaves the flag and its info default in charge of every install that
+// has not asked for anything else.
+func applyConfigLogLevel(g globals, cfg *config.Config) {
+	if g.logLevelSet || g.levelVar == nil {
+		return
+	}
+	if lvl, ok := cfg.LogLevel(); ok {
+		g.levelVar.Set(lvl)
+	}
 }
 
 func cmdDiscover(ctx context.Context) error {

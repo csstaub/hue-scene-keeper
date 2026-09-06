@@ -139,7 +139,9 @@ touches it. `resolve <light>` shows exactly this reasoning per light.
 | `resolve <light>` | Explain exactly what would happen for one light, and why. |
 
 Useful flags: `--dry-run`, `--address`, `--config`, `--log-format=json`,
-`--log-level=debug`, `--log-file`.
+`--log-level=debug`, `--log-file`. Debug logging is also a config setting
+(`log.level: debug`), which is the easier half when the daemon is started by
+launchd or systemd rather than by hand; an explicit `--log-level` wins over it.
 Flags work either side of the subcommand, so `run --dry-run` and `--dry-run run`
 are equivalent. An unrecognized flag or stray argument is an error, not silently
 ignored.

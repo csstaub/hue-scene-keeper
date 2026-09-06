@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net"
 	"os"
@@ -98,6 +99,19 @@ type Config struct {
 		// rate limiter releases it rather than from when it was queued.
 		RequestTimeout Duration `yaml:"request_timeout"`
 	} `yaml:"bridge"`
+
+	Log struct {
+		// Level is one of debug, info, warn and error, the same names
+		// --log-level takes. Empty leaves the flag's choice alone, and the
+		// flag defaults to info. An explicitly given --log-level wins over
+		// this key: a flag typed for one run beats a file written months ago.
+		//
+		// It exists because the daemon is normally started by a service
+		// manager, where turning debug logging on means editing a unit or a
+		// plist and reloading it. Every other knob the daemon has is in this
+		// file already.
+		Level string `yaml:"level"`
+	} `yaml:"log"`
 
 	// SceneName is the smart scene to recall. Configurable because the Hue
 	// app localizes it.
@@ -267,6 +281,12 @@ func (c *Config) validate() error {
 		return fmt.Errorf("bridge.requests_per_second %g is negative; omit the line to get the default",
 			c.Bridge.RequestsPerSecond)
 	}
+	// Rejected rather than ignored, for the same reason --log-level rejects
+	// what it does not know: a level nobody parses means the debug output the
+	// user came here to turn on never appears, with nothing said about why.
+	if _, _, err := parseLogLevel(c.Log.Level); err != nil {
+		return err
+	}
 	if c.CoalesceWindow.Duration() > 5*time.Second {
 		return fmt.Errorf("coalesce_window %s is too long to feel responsive", c.CoalesceWindow.Duration())
 	}
@@ -329,6 +349,32 @@ func (c *Config) validate() error {
 		seen[k] = key
 	}
 	return nil
+}
+
+// parseLogLevel accepts the names --log-level accepts. An empty string names
+// no level and is not an error: it is the absent key, which leaves the choice
+// to the flag.
+func parseLogLevel(s string) (slog.Level, bool, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, false, nil
+	}
+	var lvl slog.Level
+	if err := lvl.UnmarshalText([]byte(s)); err != nil {
+		return 0, false, fmt.Errorf("log.level %q: want debug, info, warn or error", s)
+	}
+	return lvl, true, nil
+}
+
+// LogLevel returns the level named by log.level, and whether one was named.
+// The string was validated at load time, so a Config that came from Load
+// either names a level or names nothing.
+func (c *Config) LogLevel() (slog.Level, bool) {
+	lvl, ok, err := parseLogLevel(c.Log.Level)
+	if err != nil {
+		return 0, false
+	}
+	return lvl, ok
 }
 
 // CleanAddress validates a bridge address and normalizes it to host or

@@ -25,6 +25,15 @@
 #  # the budget.
 #  request_timeout: 10s
 
+#log:
+#  # How much the daemon says: debug, info, warn or error. Same names
+#  # --log-level takes, and an explicitly given --log-level wins over this.
+#  # Set it to debug and every bridge request is logged with a timing
+#  # breakdown, along with each scheduled, deferred and suppressed recall.
+#  # This is here so that turning debug logging on under launchd or systemd
+#  # does not mean editing the plist or the unit.
+#  level: info
+
 # The smart scene to recall. The Hue app localizes this name. If your app is
 # not in English, run `hue-scene-keeper list` to see what yours is called.
 #scene_name: "Natural Light"

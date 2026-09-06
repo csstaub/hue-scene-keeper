@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -325,7 +326,7 @@ func TestLogOutputWritesToTheFileItIsGiven(t *testing.T) {
 	if err != nil {
 		t.Fatalf("logOutput: %v", err)
 	}
-	log, err := newLogger(out, "text", "info")
+	log, _, err := newLogger(out, "text", "info")
 	if err != nil {
 		t.Fatalf("newLogger: %v", err)
 	}
@@ -338,6 +339,45 @@ func TestLogOutputWritesToTheFileItIsGiven(t *testing.T) {
 	}
 	if !strings.Contains(string(b), "hello from the daemon") {
 		t.Errorf("log file = %q, want the record in it", b)
+	}
+}
+
+// TestConfigCanTurnOnDebugLogging covers the half of the log level the flags
+// do not: a level in the config file, applied to a logger that was built from
+// the flags before any file had been read. The daemon is normally started by
+// launchd or systemd, where the flags belong to a plist or a unit and the
+// config file is the part a user can edit.
+//
+// The precedence is the point of the second half. An explicit --log-level is
+// the more specific instruction and has to win, and an omitted one must not,
+// even though both arrive here as the same string.
+func TestConfigCanTurnOnDebugLogging(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("log:\n  level: debug\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(dir, "credentials.json")
+
+	load := func(g globals) *slog.LevelVar {
+		t.Helper()
+		_, levelVar, err := newLogger(io.Discard, "text", g.logLevel)
+		if err != nil {
+			t.Fatalf("newLogger: %v", err)
+		}
+		g.levelVar = levelVar
+		g.configPath, g.statePath = cfgPath, state
+		if _, _, err := loadAll(g); err != nil {
+			t.Fatalf("loadAll: %v", err)
+		}
+		return levelVar
+	}
+
+	if lvl := load(globals{logLevel: "info"}).Level(); lvl != slog.LevelDebug {
+		t.Errorf("level = %s, want the config file's debug", lvl)
+	}
+	if lvl := load(globals{logLevel: "warn", logLevelSet: true}).Level(); lvl != slog.LevelWarn {
+		t.Errorf("level = %s, want --log-level=warn to beat the config file", lvl)
 	}
 }
 
