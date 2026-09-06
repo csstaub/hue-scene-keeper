@@ -1,6 +1,7 @@
 package keeper
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -20,6 +21,7 @@ import (
 const (
 	kitchenScene = "scene-kitchen"
 	bedroomScene = "scene-bedroom"
+	zoneScene    = "scene-downstairs"
 )
 
 func testConfig() *config.Config {
@@ -1024,5 +1026,136 @@ func TestPowerRestoreKeepsItsExemptionWhenFoldedIntoAPendingRecall(t *testing.T)
 	}
 	if !k.commit(p) {
 		t.Fatal("the restore was vetoed: no light is on in the registry, which is exactly what power_restored is exempt from")
+	}
+}
+
+// --- suppression across groups -------------------------------------------------
+
+// mixedZoneBridge builds the one topology where arming a recall and attributing
+// its echo can disagree: a zone holding a room's lights alongside a light that
+// is in no room, which is the only way GroupForLight ever picks a zone at all.
+//
+// The fake can only create a light by putting it in a room, so the strip starts
+// in one. A caller that needs it genuinely roomless - the way an unassigned lamp
+// looks on a real bridge - deletes that room afterwards.
+func mixedZoneBridge(t *testing.T) (b *fake.Bridge, kitchen, strip []string) {
+	t.Helper()
+	b = fake.NewBridge(t)
+	kitchen = b.AddRoom("room-kitchen", "Kitchen", "Ceiling", "Counter")
+	b.AddSmartScene(kitchenScene, "Natural Light", "room-kitchen", hue.TypeRoom)
+	strip = b.AddRoom("room-strip", "Unassigned", "Strip")
+	b.AddZone("zone-downstairs", "Downstairs", append(append([]string{}, kitchen...), strip...)...)
+	b.AddSmartScene(zoneScene, "Natural Light", "zone-downstairs", hue.TypeZone)
+	return b, kitchen, strip
+}
+
+// TestAZoneRecallDoesNotFanOutIntoItsRooms: recalling a zone lights every light
+// in it, and each of those on-events is attributed through GroupForLight, which
+// prefers a light's room. Suppression armed on the zone alone covered none of
+// them, so one zone recall became a recall of every room in that zone.
+func TestAZoneRecallDoesNotFanOutIntoItsRooms(t *testing.T) {
+	b, _, strip := mixedZoneBridge(t)
+	b.EchoOnRecall = true
+	_, reg := startKeeper(t, b, nil)
+
+	// The strip loses its room, so the zone is what governs it.
+	b.Publish("delete", map[string]any{"id": "room-strip", "type": hue.TypeRoom})
+	waitFor(t, 5*time.Second, "the strip to become roomless", func() bool {
+		g, ok := reg.GroupForLight(strip[0])
+		return ok && g.ID == "zone-downstairs"
+	})
+
+	b.SwitchLight(strip[0], true)
+	waitForRecalls(t, b, 1)
+
+	// The kitchen's two lights have just reported themselves on, off the back
+	// of our own recall. Neither may cause one.
+	settle()
+	settle()
+
+	if got := b.Recalls(); len(got) != 1 || got[0] != zoneScene {
+		t.Fatalf("a zone recall fanned out: expected one recall of %s, got %v", zoneScene, got)
+	}
+}
+
+// TestAFailedZoneRecallReleasesEveryGroupItArmed is the other half of the same
+// change: commit now arms more than one group, so rollback has to give back
+// exactly that set. An asymmetry here is worse than the bug - one refused zone
+// recall would leave every room in the zone silently suppressed, with no retry
+// of its own to recover it.
+func TestAFailedZoneRecallReleasesEveryGroupItArmed(t *testing.T) {
+	b, kitchen, _ := mixedZoneBridge(t)
+	// The zone needs a light on, or commit vetoes the recall before arming.
+	b.SetLightStateSilently(kitchen[0], true)
+	b.FailNextRecalls(1)
+
+	reg := registry.New()
+	k := New(b.Client(), reg, testConfig(), testLogger(t), false)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := k.Resync(ctx); err != nil {
+		t.Fatalf("resync: %v", err)
+	}
+
+	p := &pendingRecall{recall: recall{
+		groupID: "zone-downstairs", groupName: "Downstairs",
+		sceneID: zoneScene, sceneName: "Natural Light", reason: reasonSwitchedOn,
+	}}
+	if !k.commit(p) {
+		t.Fatal("the zone recall should have been admitted")
+	}
+	<-k.sendQ
+	if _, ok := k.suppressUntil["room-kitchen"]; !ok {
+		t.Fatal("commit armed the zone but not the room its echo is attributed to")
+	}
+
+	err := k.client.RecallSmartScene(ctx, p.sceneID)
+	if err == nil {
+		t.Fatal("the bridge was supposed to refuse this recall")
+	}
+	k.finish(map[string]*pendingRecall{}, outcome{pending: p, err: err})
+
+	if len(k.suppressUntil) != 0 {
+		t.Fatalf("a refused recall left groups suppressed: %v", k.suppressUntil)
+	}
+	if len(k.lastRecall) != 0 {
+		t.Fatalf("a refused recall left the recall floor armed: %v", k.lastRecall)
+	}
+}
+
+// --- construction and crashes --------------------------------------------------
+
+// TestNewToleratesANilConfig: New nil-checks the logger, and a nil config used
+// to sail straight past it and panic on the dispatch goroutine at the first
+// trigger - seconds later, on a stack that names nobody who built the Keeper.
+func TestNewToleratesANilConfig(t *testing.T) {
+	k := New(nil, nil, nil, testLogger(t), false)
+	if got, want := k.coalesceWindow(), config.Default().CoalesceWindow.Duration(); got != want {
+		t.Fatalf("a nil config should fall back to the defaults, got %s want %s", got, want)
+	}
+}
+
+// TestAPanickingWorkerIsLoggedAndStillDies: the recover on Run's goroutines is
+// there to name which one went, not to keep it going. Absorbing the panic would
+// leave the daemon running with no dispatch goroutine - alive, quiet, and
+// recalling nothing - which is worse than the crash the service manager can see.
+func TestAPanickingWorkerIsLoggedAndStillDies(t *testing.T) {
+	var buf bytes.Buffer
+	k := &Keeper{log: slog.New(slog.NewTextHandler(&buf, nil))}
+
+	rethrown := func() (v any) {
+		defer func() { v = recover() }()
+		defer k.logPanic("dispatch")
+		panic("bridge sent something we did not expect")
+	}()
+
+	if rethrown == nil {
+		t.Fatal("logPanic swallowed the panic instead of logging it and letting it through")
+	}
+	out := buf.String()
+	for _, want := range []string{"goroutine=dispatch", "did not expect", "stack="} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the panic log omitted %q:\n%s", want, out)
+		}
 	}
 }
