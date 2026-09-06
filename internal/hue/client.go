@@ -29,9 +29,9 @@ const DefaultRequestTimeout = 10 * time.Second
 
 // StatusError is a non-2xx response from the bridge.
 //
-// It exists so callers can tell a transient refusal apart from a permanent
-// one: a recall that failed with 503 is worth retrying, one that failed with
-// 404 means the scene is gone and retrying would only hammer the bridge.
+// It lets callers tell a transient refusal apart from a permanent one. A recall
+// that failed with 503 is worth retrying. One that failed with 404 means the
+// scene is gone, and retrying would only hammer the bridge.
 type StatusError struct {
 	StatusCode int
 	Method     string
@@ -46,10 +46,10 @@ func (e *StatusError) Error() string {
 
 // Retryable reports whether the request is worth sending again later.
 //
-// 429 is the bridge asking us to slow down, and the 5xx family covers a bridge
-// that is busy, restarting, or behind a flaky link. Everything else - a bad
-// app key, a deleted scene, a malformed body - needs a human, and repeating it
-// only adds load.
+// 429 is the bridge asking us to slow down. The 5xx family covers a bridge that
+// is busy, restarting, or behind a flaky link. Everything else needs a human. A
+// bad app key, a deleted scene, a malformed body. Repeating those only adds
+// load.
 func (e *StatusError) Retryable() bool {
 	switch e.StatusCode {
 	case http.StatusTooManyRequests,
@@ -64,12 +64,13 @@ func (e *StatusError) Retryable() bool {
 
 // EnvelopeError is a refusal the bridge reported inside a 2xx response.
 //
-// CLIP v2 does not use status codes for most application-level failures: an
-// unknown scene id, a group that no longer exists, a body it will not accept
+// CLIP v2 does not use status codes for most application-level failures. An
+// unknown scene id, a group that no longer exists, or a body it will not accept
 // all come back as HTTP 200 with a populated errors array. Without a type of
-// its own such a refusal reached Retryable as a plain error and fell through
-// to "transient", so a scene deleted in the Hue app was recalled again through
-// the whole of recallBackoff - exactly what StatusError exists to prevent.
+// its own, such a refusal reached Retryable as a plain error and fell through
+// to "transient". A scene deleted in the Hue app was then recalled again
+// through the whole of recallBackoff. That is exactly what StatusError exists
+// to prevent.
 type EnvelopeError struct {
 	Method      string
 	Path        string
@@ -82,12 +83,11 @@ func (e *EnvelopeError) Error() string {
 
 // Retryable reports whether the refusal is worth sending again later.
 //
-// Always false. The bridge gives us no machine-readable code to sort these by
-// - only a human-readable description whose wording is not part of any
-// contract - and the failures it delivers this way are lookups and validation:
-// the resource is gone, the id is wrong, the payload is wrong. None of those
-// resolve by asking again, so the safe default is to surface the description
-// once rather than bury it under a backoff.
+// Always false. The bridge gives no machine-readable code to sort these by,
+// only a human-readable description whose wording is not part of any contract.
+// The failures it delivers this way are lookups and validation. The resource is
+// gone, the id is wrong, the payload is wrong. None of those resolve by asking
+// again. Better to report the description once than bury it under a backoff.
 func (e *EnvelopeError) Retryable() bool { return false }
 
 // envelopeError returns the bridge's first envelope error for a request, or
@@ -99,18 +99,18 @@ func envelopeError(method, path string, env Envelope) error {
 	return &EnvelopeError{Method: method, Path: path, Description: env.Errors[0].Description}
 }
 
-// ErrRequestTimeout is returned when a request exceeds the client's
-// per-request timeout. It is distinct from the caller's context expiring:
-// a slow bridge is worth another try, a shutting-down caller is not.
+// ErrRequestTimeout is returned when a request exceeds the client's per-request
+// timeout. It is distinct from the caller's context expiring. A slow bridge is
+// worth another try. A shutting-down caller is not.
 var ErrRequestTimeout = errors.New("bridge request timed out")
 
 // Retryable reports whether an error from a Client call is worth retrying.
 //
-// A transport error - connection refused, reset, timed out - is transient by
-// nature, so anything that is not a refusal the bridge spelled out and not a
-// cancelled context counts. The bridge spells them out two ways, by status
+// A transport error (connection refused, reset, timed out) is transient by
+// nature. So anything that is not a refusal the bridge spelled out, and not a
+// canceled context, counts. The bridge spells refusals out two ways, by status
 // code and inside a 2xx envelope, and both get to answer for themselves. The
-// caller's own context errors do not: it is shutting down or gave up, and
+// caller's own context errors do not. It is shutting down or it gave up, and
 // there is nobody left to retry for.
 func Retryable(err error) bool {
 	if err == nil {
@@ -123,9 +123,9 @@ func Retryable(err error) bool {
 		return false
 	}
 	// A pin mismatch is the one thing pinning exists to detect, and it never
-	// resolves itself: either the bridge was replaced and the user must
+	// resolves itself. Either the bridge was replaced and the user must
 	// re-pair, or something is impersonating it. Retrying buries that in a
-	// stream of retry warnings instead of surfacing it.
+	// stream of retry warnings instead of reporting it.
 	if errors.Is(err, ErrPinMismatch) {
 		return false
 	}
@@ -143,25 +143,26 @@ func Retryable(err error) bool {
 // Pin holds the trust-on-first-use pin for a bridge's TLS key.
 //
 // The bridge serves a self-signed certificate, so ordinary chain verification
-// cannot work. We accept whatever it presents the first time, remember the
-// SHA-256 of its SubjectPublicKeyInfo, and fail closed on any later change.
+// cannot work. The client accepts whatever it presents the first time,
+// remembers the SHA-256 of its SubjectPublicKeyInfo, and fails closed on any
+// later change.
 type Pin struct {
 	mu    sync.Mutex
 	value string
-	// learning serialises the trust-on-first-use path, so that exactly one
+	// learning serializes the trust-on-first-use path, so exactly one
 	// handshake learns however many arrive at once. It exists because mu is
-	// deliberately not held across OnLearn: see verify.
+	// deliberately not held across OnLearn. See verify.
 	learning sync.Mutex
 	// OnLearn, if set, is called once when a pin is first recorded so the
-	// caller can persist it - and it must genuinely persist, because the pin is
+	// caller can persist it. It must genuinely persist, because the pin is
 	// not trusted unless it returns nil.
 	//
 	// It is called with none of the Pin's locks held, from inside the TLS
-	// handshake, so it may read Value() and may take as long as an fsync'd
-	// write needs. What it must not do is drive a fresh handshake against this
-	// same Pin: that re-enters verify, which is the one thing the learning lock
-	// cannot let through. Set it before the first connection; it is read once,
-	// under mu, and never written from here.
+	// handshake. It may read Value() and may take as long as an fsync'd write
+	// needs. What it must not do is drive a fresh handshake against this same
+	// Pin. That re-enters verify, the one thing the learning lock cannot let
+	// through. Set it before the first connection. It is read once, under mu,
+	// and never written from here.
 	OnLearn func(pin string) error
 }
 
@@ -193,11 +194,11 @@ func (p *Pin) verify(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 		return matchPin(have, got)
 	}
 
-	// Learning. The lock held from here is not mu: OnLearn writes the pin to
+	// Learning. The lock held from here is not mu. OnLearn writes the pin to
 	// disk, fsync and all, and this is a VerifyPeerCertificate callback on the
-	// TLS handshake goroutine - so holding the lock that Value() takes across
-	// it means any callback that reads its own Pin deadlocks the handshake. A
-	// second lock keeps the "learned exactly once" guarantee without that.
+	// TLS handshake goroutine. Hold the lock that Value() takes across it and
+	// any callback reading its own Pin deadlocks the handshake. A second lock
+	// keeps the "learned exactly once" guarantee without that.
 	p.learning.Lock()
 	defer p.learning.Unlock()
 
@@ -210,10 +211,10 @@ func (p *Pin) verify(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 		return matchPin(have, got)
 	}
 
-	// Persist before committing. If the save fails and we kept the pin in
-	// memory anyway, this process would carry on happily while nothing was
-	// written - so every restart would re-enter the trust-on-first-use
-	// window with no warning that pinning had silently stopped working.
+	// Persist before committing. Keep the pin in memory after a failed save
+	// and this process carries on happily while nothing was written. Every
+	// restart would then re-enter the trust-on-first-use window, with no
+	// warning that pinning had silently stopped working.
 	if onLearn != nil {
 		if err := onLearn(got); err != nil {
 			return fmt.Errorf("refusing to trust bridge certificate: could not persist pin: %w", err)
@@ -234,7 +235,7 @@ func matchPin(have, got string) error {
 		ErrPinMismatch, have, got)
 }
 
-// limiter is a token bucket without burst: it spaces requests evenly.
+// limiter is a token bucket with no burst allowance. It spaces requests evenly.
 type limiter struct {
 	mu       sync.Mutex
 	interval time.Duration
@@ -249,7 +250,7 @@ func newLimiter(perSecond float64) *limiter {
 }
 
 func (l *limiter) wait(ctx context.Context) error {
-	// Check before reserving: a caller whose context is already dead must not
+	// Check before reserving. A caller whose context is already dead must not
 	// consume a slot and push the queue out for everyone behind it.
 	if err := ctx.Err(); err != nil {
 		return err
@@ -272,8 +273,8 @@ func (l *limiter) wait(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		// The request will never be sent, so the slot it was holding has to go
-		// back; otherwise a caller that gives up mid-wait still pushes everyone
-		// queued behind it out by a full interval.
+		// back. Otherwise a caller that gives up mid-wait still pushes
+		// everyone queued behind it out by a full interval.
 		l.release(reserved)
 		return ctx.Err()
 	case <-t.C:
@@ -283,12 +284,11 @@ func (l *limiter) wait(ctx context.Context) error {
 
 // release hands back a reservation whose wait was abandoned.
 //
-// It only rolls back when l.next is still exactly where we left it, i.e. we
-// were the last caller to reserve. If someone queued behind us in the
-// meantime, their slot was picked on the assumption that ours was taken, and
-// subtracting an interval now would pull them forward into a gap they are
-// already waiting out - two requests back to back, which is the one thing the
-// limiter exists to prevent.
+// It only rolls back when l.next is still exactly where this caller left it,
+// meaning it was the last to reserve. If someone queued behind it in the
+// meantime, their slot was picked assuming this one was taken. Subtracting an
+// interval now would pull them forward into a gap they are already waiting out.
+// Two requests back to back, which is the one thing the limiter prevents.
 func (l *limiter) release(reserved time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -333,24 +333,25 @@ func New(o Options) *Client {
 		pin = NewPin("")
 	}
 	tlsCfg := &tls.Config{
-		// The bridge is self-signed; Pin.verify supplies the real check.
+		// The bridge is self-signed. Pin.verify supplies the real check.
 		InsecureSkipVerify: true,
 		MinVersion:         tls.VersionTLS12,
 		// Session resumption. Without it every connection to the bridge is a
-		// full handshake, and IdleConnTimeout below means the pool is nearly
-		// always cold when a recall goes out - the gap between one room and
-		// the next is minutes - so the handshake lands on the critical path of
-		// a user-visible event, on a bridge slow enough for it to matter.
+		// full handshake. IdleConnTimeout below means the pool is nearly
+		// always cold when a recall goes out, since the gap between one room
+		// and the next is minutes. The handshake then lands on the critical
+		// path of a user-visible event, on a bridge slow enough for it to
+		// matter.
 		//
-		// Note this means Pin.verify is NOT called on a resumed handshake: Go
+		// Note this means Pin.verify is NOT called on a resumed handshake. Go
 		// restores PeerCertificates from the session rather than re-verifying.
-		// That is safe because only a peer holding the master secret of a
-		// session we already pinned can resume one; an impersonator, or a
-		// replaced bridge, can only offer a full handshake, which runs the
-		// check and fails closed. Set outside the !o.Insecure branch below
-		// because the cache is orthogonal to pinning. The size is nominal: one
-		// bridge, and with ServerName filled in by the transport the key is
-		// the host we are talking to.
+		// That is safe. Only a peer holding the master secret of a session
+		// already pinned can resume one. An impersonator, or a replaced
+		// bridge, can only offer a full handshake, which runs the check and
+		// fails closed. Set outside the !o.Insecure branch below because the
+		// cache is orthogonal to pinning. The size is nominal: one bridge, and
+		// with ServerName filled in by the transport the key is the host being
+		// talked to.
 		ClientSessionCache: tls.NewLRUClientSessionCache(8),
 	}
 	if !o.Insecure {
@@ -359,13 +360,13 @@ func New(o Options) *Client {
 	transport := &http.Transport{
 		TLSClientConfig: tlsCfg,
 		// HTTP/1.1 only, deliberately. The event stream's watchdog recovers a
-		// wedged bridge by cancelling the request context; under HTTP/2 that
+		// wedged bridge by canceling the request context. Under HTTP/2 that
 		// only sends RST_STREAM for one stream and leaves the TCP connection
 		// in the pool, so the "reconnect" opens a fresh stream on the same
 		// dead connection and the daemon never recovers. Under HTTP/1.1
-		// cancelling closes the connection, which is what the watchdog means.
-		// The bridge is a LAN device we hold one stream and a trickle of
-		// requests against, so multiplexing buys nothing here.
+		// canceling closes the connection, which is what the watchdog means.
+		// The bridge is a LAN device holding one stream and a trickle of
+		// requests, so multiplexing buys nothing here.
 		ForceAttemptHTTP2:   false,
 		MaxIdleConns:        4,
 		IdleConnTimeout:     90 * time.Second,
@@ -386,9 +387,9 @@ func New(o Options) *Client {
 	return &Client{
 		addr:   addr,
 		appKey: o.AppKey,
-		// No Timeout: it would also cap the event stream, which must run
-		// indefinitely. Per-request deadlines come from the context - do()
-		// derives one from c.timeout, and Stream deliberately does not.
+		// No Timeout. It would also cap the event stream, which must run
+		// indefinitely. Per-request deadlines come from the context instead.
+		// do() derives one from c.timeout, and Stream deliberately does not.
 		http:    &http.Client{Transport: transport},
 		lim:     newLimiter(o.RequestsPerSecond),
 		pin:     pin,
@@ -402,20 +403,20 @@ func (c *Client) Address() string { return c.addr }
 // Pin returns the client's TLS pin state.
 func (c *Client) Pin() *Pin { return c.pin }
 
-// hostPort normalises a bridge address for splicing into a URL.
+// hostPort normalizes a bridge address for splicing into a URL.
 //
-// An IPv6 literal has to be bracketed: net/url reads "https://fe80::1/..." as
-// a host of "fe80:" on port 1, which no amount of network will fix and which
-// surfaces as an error about a port the user never wrote. Everything else
-// - a hostname, an IPv4 literal, an address that already carries a port or
-// brackets - comes back unchanged, so it is safe to apply at every point a URL
-// is built.
+// An IPv6 literal has to be bracketed. net/url reads "https://fe80::1/..." as
+// a host of "fe80:" on port 1, which no amount of network will fix, and which
+// comes back as an error about a port the user never wrote. Everything else
+// comes back unchanged: a hostname, an IPv4 literal, an address that already
+// carries a port or brackets. So it is safe to apply at every point a URL is
+// built.
 func hostPort(addr string) string {
 	if host, port, err := net.SplitHostPort(addr); err == nil {
 		return net.JoinHostPort(host, port)
 	}
 	// SplitHostPort refuses a bare IPv6 literal for having too many colons,
-	// which is precisely the case that needs the brackets. Anything already
+	// which is exactly the case that needs the brackets. Anything already
 	// bracketed fails net.ParseIP and is left alone.
 	if ip := net.ParseIP(addr); ip != nil && ip.To4() == nil {
 		return "[" + addr + "]"
@@ -431,10 +432,10 @@ func (c *Client) do(ctx context.Context, method, path string, body any) ([]byte,
 	if err := c.lim.wait(ctx); err != nil {
 		return nil, err
 	}
-	// The deadline starts here, after the limiter has released us, not at
-	// entry. A request queued twenty slots deep waits five seconds for its
-	// turn; starting the clock before that would spend most of its budget in
-	// the queue and time out requests that were never actually sent.
+	// The deadline starts here, after the limiter has released the request,
+	// not at entry. A request queued twenty slots deep waits five seconds for
+	// its turn. Start the clock before that and it spends most of its budget
+	// in the queue, timing out requests that were never actually sent.
 	reqCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
@@ -477,10 +478,9 @@ func (c *Client) do(ctx context.Context, method, path string, body any) ([]byte,
 	return raw, nil
 }
 
-// classify distinguishes our own per-request deadline from the caller's
-// context ending. Both surface as context.DeadlineExceeded underneath, but
-// only the first is worth retrying, so the caller cannot tell them apart
-// without help from here.
+// classify tells the client's own per-request deadline apart from the caller's
+// context ending. Both come out as context.DeadlineExceeded underneath, and
+// only the first is worth retrying, so the caller needs help from here.
 func (c *Client) classify(ctx, reqCtx context.Context, err error) error {
 	if ctx.Err() == nil && reqCtx.Err() != nil {
 		return fmt.Errorf("%w after %s: %w", ErrRequestTimeout, c.timeout, err)

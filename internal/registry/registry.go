@@ -1,6 +1,6 @@
-// Package registry keeps an in-memory mirror of the bridge's resources and the
-// lookups the keeper needs: which room a light lives in, and which smart scene
-// belongs to that room.
+// Package registry keeps an in-memory mirror of the bridge's resources, plus
+// the two lookups the keeper needs. Which room a light lives in, and which
+// smart scene belongs to that room.
 package registry
 
 import (
@@ -56,8 +56,8 @@ func (r *Registry) reset() {
 }
 
 // Sync replaces the whole cache from the bridge. A full refetch is a handful of
-// requests, which is cheaper than trying to repair the cache incrementally
-// after a disconnect of unknown length.
+// requests, cheaper than repairing the cache incrementally after a disconnect
+// of unknown length.
 func (r *Registry) Sync(ctx context.Context, c *hue.Client) error {
 	type fetch struct {
 		rtype string
@@ -144,18 +144,18 @@ func (r *Registry) Sync(ctx context.Context, c *hue.Client) error {
 		skipped := 0
 		for _, raw := range entries {
 			if err := f.into(raw); err != nil {
-				// One resource we cannot read must not cost us the sync.
+				// One unreadable resource must not cost the whole sync.
 				// Failing here fails Resync, which drops the stream, and the
-				// same resource comes back on the reconnect - so the daemon
+				// same resource comes back on the reconnect. The daemon then
 				// settles at the backoff cap, connecting and dropping forever
 				// while doing nothing at all.
 				skipped++
 				slog.Warn("skipping unusable resource", "type", f.rtype, "err", err)
 			}
 		}
-		// Nothing usable in a type the bridge did return entries for is a
-		// shape change rather than one bad resource, and carrying on would
-		// leave the cache quietly empty of a whole class of resource.
+		// Nothing usable in a type the bridge did return entries for means the
+		// API changed, not that one resource is bad. Carrying on would leave
+		// the cache quietly empty of a whole class of resource.
 		if skipped > 0 && skipped == len(entries) {
 			return fmt.Errorf("sync %s: none of the %d entries were usable", f.rtype, len(entries))
 		}
@@ -325,9 +325,9 @@ func (r *Registry) applyOne(action string, raw json.RawMessage) bool {
 	return false
 }
 
-// mergeLight overlays a (possibly partial) update onto the cached light.
-// Update events carry only the fields that changed, so absent fields must not
-// clobber what we already know.
+// mergeLight overlays a (possibly partial) update onto the cached light. Update
+// events carry only the fields that changed, so absent fields must not clobber
+// what the cache already holds.
 func mergeLight(cur, in hue.Light) hue.Light {
 	cur.ID, cur.Type = in.ID, hue.TypeLight
 	if in.Owner.RID != "" {
@@ -407,11 +407,11 @@ func (r *Registry) Group(id string) (hue.Group, bool) {
 
 // GroupForLight resolves the group whose smart scene should govern a light.
 //
-// Rooms win over zones: a light belongs to exactly one room, but may belong to
+// Rooms win over zones. A light belongs to exactly one room but may belong to
 // several zones, and the room is the grouping the Hue app builds Natural Light
 // against.
 //
-// Exclusion feeds the resolution rather than vetoing its result: an excluded
+// Exclusion feeds the resolution rather than vetoing its result. An excluded
 // room cedes its lights to the first non-excluded zone holding them, which is
 // what lets a zone carve a light out of a room the daemon otherwise leaves
 // alone. A light whose room and zones are all excluded belongs to nothing.
@@ -427,11 +427,11 @@ func (r *Registry) groupForLightLocked(lightID string, excluded func(string) boo
 		excluded = func(string) bool { return false }
 	}
 	// A light the cache no longer holds belongs to nothing. The zone fallback
-	// below would otherwise still find it: a deleted light stays in its zone's
+	// below would otherwise still find it. A deleted light stays in its zone's
 	// Children until the zone itself updates, so lightToZones keeps the
-	// mapping, and the zone then reads as reachable - which is enough to
-	// silence the GroupShadowed warning the config layer prints for an
-	// exclusion that does nothing.
+	// mapping and the zone reads as reachable. That is enough to silence the
+	// GroupShadowed warning the config layer prints for an exclusion that has
+	// stopped doing anything.
 	l, ok := r.lights[lightID]
 	if !ok {
 		return hue.Group{}, false
@@ -456,18 +456,18 @@ func (r *Registry) groupForLightLocked(lightID string, excluded func(string) boo
 }
 
 // GroupShadowed reports whether every light in a group resolves to some *other*
-// group, which makes the group unreachable: nothing the keeper does is ever
+// group. Such a group is unreachable. Nothing the keeper does is ever
 // attributed to it, so excluding it or pinning a scene to it is a no-op.
 //
 // On a real bridge this is the normal state of a zone whose rooms are not
-// excluded: rooms win in GroupForLight and every light is in a room, so such a
+// excluded. Rooms win in GroupForLight and every light is in a room, so such a
 // zone is selected only for the lights that somehow have no room at all. An
-// excluded room cedes its lights, though, which is what un-shadows a zone that
-// carves them out. The config layer uses this, with the exclusions it is
+// excluded room cedes its lights, though, and that is what un-shadows a zone
+// carving them out. The config layer uses this, with the exclusions it is
 // resolving, to warn about an exclusion that would otherwise fail in complete
 // silence.
 //
-// A group with no lights is not shadowed. Nothing is stealing its lights; it
+// A group with no lights is not shadowed. Nothing is stealing its lights. It
 // simply has none yet, and warning about an empty room the user is still
 // furnishing would be noise.
 func (r *Registry) GroupShadowed(groupID string, excluded func(string) bool) bool {
@@ -548,7 +548,7 @@ func (r *Registry) Connectivity(id string) (hue.ZigbeeConnectivity, bool) {
 
 // SmartSceneForGroup finds the smart scene bound to a group whose name matches
 // wantName, case-insensitively. The name is configurable because the Hue app
-// localises it.
+// localizes it.
 func (r *Registry) SmartSceneForGroup(groupID, wantName string) (hue.SmartScene, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -602,9 +602,9 @@ func (r *Registry) Counts() (lights, rooms, zones, smartScenes int) {
 
 // OnLightIDs returns the set of lights currently believed to be on.
 //
-// The keeper snapshots this across a reconnect: a light that came on while the
-// stream was down produces no off->on edge, because the resync simply records
-// it as already on. Diffing two snapshots recovers exactly those lights.
+// The keeper snapshots this across a reconnect. A light that came on while the
+// stream was down produces no off->on edge, because the resync records it as
+// already on. Diffing two snapshots recovers exactly those lights.
 func (r *Registry) OnLightIDs() map[string]bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -621,10 +621,10 @@ func (r *Registry) OnLightIDs() map[string]bool {
 // reports as anything other than connected.
 //
 // The keeper snapshots this across a reconnect for the same reason it snapshots
-// OnLightIDs: a lamp whose mains came back while the stream was down sends no
+// OnLightIDs. A lamp whose mains came back while the stream was down sends no
 // `connected` event anyone was listening for, and the resync then records it as
 // connected as though it always had been. Devices with no status yet are left
-// out - there is no transition to recover from.
+// out, since there is no transition to recover from.
 func (r *Registry) DisconnectedDeviceIDs() map[string]bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

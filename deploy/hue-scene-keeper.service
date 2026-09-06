@@ -1,8 +1,8 @@
 # systemd unit for hue-scene-keeper.
 #
-# Install (run go:install as yourself, not under sudo: it builds as you and
-# elevates only the copy into /usr/local/bin, whereas sudo would re-run the
-# compiler as root and leave root-owned entries in your Go caches):
+# Install steps. Run go:install as yourself, not under sudo. It builds as you
+# and elevates only the copy into /usr/local/bin. Under sudo the compiler
+# re-runs as root and leaves root-owned entries in your Go caches.
 #   go tool mage go:install
 #   go tool mage installConfig
 #   sudo useradd --system --home-dir /var/lib/hue-scene-keeper --shell /usr/sbin/nologin hue
@@ -11,7 +11,7 @@
 #
 # Pair BEFORE starting the service, as the service user and with the same
 # --state path the unit uses. Paths are passed explicitly rather than through
-# XDG_* so that this command and the unit cannot drift apart:
+# XDG_* so this command and the unit cannot drift apart:
 #
 #   sudo -u hue /usr/local/bin/hue-scene-keeper \
 #       --state /var/lib/hue-scene-keeper/credentials.json auth
@@ -21,22 +21,22 @@
 #   sudo systemctl enable --now hue-scene-keeper
 #   journalctl -u hue-scene-keeper -f
 #
-# Enabling before pairing is not fatal but is not self-healing either: with no
-# credentials `run` exits at once, and Restart=always at RestartSec=5s burns
-# StartLimitBurst in under a minute, leaving the unit failed with
+# Enabling before pairing is not fatal, but it is not self-healing either.
+# With no credentials `run` exits at once. Restart=always at RestartSec=5s
+# then burns StartLimitBurst in under a minute, leaving the unit failed with
 # "start-request-repeated-too-quickly". systemd will not start it again, even
 # once the credentials exist, until the counter is cleared:
 #   sudo systemctl reset-failed hue-scene-keeper
 #   sudo systemctl start hue-scene-keeper
 #
 # The config file is the other way into that state, which is why installConfig
-# is in the list above. Run by hand the daemon needs no config file at all, but
-# this unit *names* one, and an explicitly-given --config that does not exist is
-# a fatal error rather than a fallback to the defaults - it is what catches a
-# typo in a hand-typed path. What installConfig writes is entirely comments, so
-# it selects nothing and every default stays the daemon's, but the file has to
-# be there. Deleting it later fails the unit exactly as missing credentials do,
-# with the same cure.
+# is in the list above. Run by hand, the daemon needs no config file at all.
+# But this unit *names* one, and an explicitly given --config that does not
+# exist is a fatal error rather than a fallback to the defaults. That is what
+# catches a typo in a hand-typed path. What installConfig writes is entirely
+# comments, so it selects nothing and every default stays the daemon's. The
+# file just has to be there. Deleting it later fails the unit exactly as
+# missing credentials do, with the same cure.
 
 [Unit]
 Description=Keep Philips Hue rooms in their all-day smart scene
@@ -44,7 +44,7 @@ After=network-online.target
 Wants=network-online.target
 
 # Do not restart-loop forever on an unrecoverable error such as missing
-# credentials; fail visibly instead of filling the journal.
+# credentials. Fail visibly instead of filling the journal.
 StartLimitIntervalSec=300
 StartLimitBurst=10
 

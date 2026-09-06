@@ -19,11 +19,11 @@ import (
 	"time"
 )
 
-// TestLimiterReturnsCancelledReservation guards the case where a caller gives
-// up while queued: its slot has to go back, or a context that dies mid-wait
-// silently delays every request behind it by a full interval - and under a
-// whole-house restore those cancellations arrive in bursts.
-func TestLimiterReturnsCancelledReservation(t *testing.T) {
+// TestLimiterReturnsCanceledReservation guards the case where a caller gives
+// up while queued. Its slot has to go back. Otherwise a context that dies
+// mid-wait silently delays every request behind it by a full interval, and
+// under a whole-house restore those cancellations arrive in bursts.
+func TestLimiterReturnsCanceledReservation(t *testing.T) {
 	l := newLimiter(10) // 100ms apart
 
 	if err := l.wait(context.Background()); err != nil {
@@ -36,7 +36,7 @@ func TestLimiterReturnsCancelledReservation(t *testing.T) {
 		cancel()
 	}()
 	if err := l.wait(ctx); !errors.Is(err, context.Canceled) {
-		t.Fatalf("cancelled wait returned %v, want context.Canceled", err)
+		t.Fatalf("canceled wait returned %v, want context.Canceled", err)
 	}
 
 	// The abandoned caller reserved the slot 100ms out, so the next caller
@@ -46,14 +46,14 @@ func TestLimiterReturnsCancelledReservation(t *testing.T) {
 		t.Fatalf("third wait: %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > 130*time.Millisecond {
-		t.Fatalf("waited %s after a cancelled wait; the slot was not returned", elapsed)
+		t.Fatalf("waited %s after a canceled wait; the slot was not returned", elapsed)
 	}
 }
 
-// TestLimiterKeepsLaterReservationOnRelease covers the concurrent case: by the
-// time a cancelled caller returns its slot, someone else may have reserved
-// after it. Rolling back then would pull that caller forward into a gap it is
-// still waiting out, putting two requests on the wire back to back.
+// TestLimiterKeepsLaterReservationOnRelease covers the concurrent case. By the
+// time a canceled caller returns its slot, someone else may have reserved after
+// it. Rolling back then would pull that caller forward into a gap it is still
+// waiting out, putting two requests on the wire back to back.
 func TestLimiterKeepsLaterReservationOnRelease(t *testing.T) {
 	l := newLimiter(10)
 	mine := time.Now().Add(l.interval)
@@ -67,8 +67,8 @@ func TestLimiterKeepsLaterReservationOnRelease(t *testing.T) {
 	}
 }
 
-// TestLimiterRejectsDeadContextWithoutReserving: a caller arriving with an
-// already-cancelled context must not spend a slot on a request it will never
+// TestLimiterRejectsDeadContextWithoutReserving. A caller arriving with an
+// already-canceled context must not spend a slot on a request it will never
 // send.
 func TestLimiterRejectsDeadContextWithoutReserving(t *testing.T) {
 	l := newLimiter(10)
@@ -110,12 +110,12 @@ func TestStatusErrorRetryClassification(t *testing.T) {
 	}
 }
 
-// TestRetryableIgnoresTheCallersContext: a shutting-down daemon has nobody
-// left to retry for, but its own per-request deadline expiring means the
-// bridge was slow, which is worth another go.
+// TestRetryableIgnoresTheCallersContext. A shutting-down daemon has nobody left
+// to retry for. The client's own per-request deadline expiring means the bridge
+// was slow, and that is worth another try.
 func TestRetryableIgnoresTheCallersContext(t *testing.T) {
 	if Retryable(context.Canceled) {
-		t.Error("a cancelled caller must not be retried")
+		t.Error("a canceled caller must not be retried")
 	}
 	if Retryable(context.DeadlineExceeded) {
 		t.Error("a caller's expired deadline must not be retried")
@@ -131,7 +131,7 @@ func TestRetryableIgnoresTheCallersContext(t *testing.T) {
 	}
 }
 
-// TestRequestTimeoutFiresAndIsDistinguishable: hue.Client has no
+// TestRequestTimeoutFiresAndIsDistinguishable. hue.Client has no
 // http.Client.Timeout by design, since it would cap the event stream too. This
 // is the per-request deadline that stands in for it.
 func TestRequestTimeoutFiresAndIsDistinguishable(t *testing.T) {
@@ -160,7 +160,7 @@ func TestRequestTimeoutFiresAndIsDistinguishable(t *testing.T) {
 	}
 }
 
-// TestRequestTimeoutStartsAfterTheRateLimiter: the deadline covers the request,
+// TestRequestTimeoutStartsAfterTheRateLimiter. The deadline covers the request,
 // not the wait for a turn. Starting it at entry would time out requests that
 // were never sent, and the deeper the queue the more of them.
 func TestRequestTimeoutStartsAfterTheRateLimiter(t *testing.T) {
@@ -169,8 +169,8 @@ func TestRequestTimeoutStartsAfterTheRateLimiter(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	// One request per second, so the second call waits a second for its turn -
-	// far longer than the timeout it must not spend while queued.
+	// One request per second, so the second call waits a second for its turn.
+	// That is far longer than the timeout it must not spend while queued.
 	c := New(Options{
 		BaseURL: srv.URL, AppKey: "k", Insecure: true,
 		RequestsPerSecond: 1, RequestTimeout: 300 * time.Millisecond,
@@ -184,8 +184,8 @@ func TestRequestTimeoutStartsAfterTheRateLimiter(t *testing.T) {
 	}
 }
 
-// TestEnvelopeRefusalIsNotRetried: CLIP v2 answers a deleted scene with 200
-// and a populated errors array, not with 404. Read as a transport blip, that
+// TestEnvelopeRefusalIsNotRetried. CLIP v2 answers a deleted scene with 200 and
+// a populated errors array, not with 404. Read as a transport blip, that
 // permanent refusal was recalled again through the whole of recallBackoff.
 func TestEnvelopeRefusalIsNotRetried(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -231,9 +231,9 @@ func TestEnvelopeRefusalOnReadsIsNotRetried(t *testing.T) {
 	}
 }
 
-// TestClientResumesTLSSessions: without a ClientSessionCache every connection
+// TestClientResumesTLSSessions. Without a ClientSessionCache every connection
 // to the bridge is a full handshake, and the pool is nearly always cold when a
-// recall goes out - so that handshake sits on the critical path of a
+// recall goes out. That handshake then sits on the critical path of a
 // user-visible event, on a bridge slow enough for it to matter.
 func TestClientResumesTLSSessions(t *testing.T) {
 	var resumed []bool
@@ -243,7 +243,7 @@ func TestClientResumesTLSSessions(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	// Pinning left on: this is the production shape, and the point is that the
+	// Pinning left on. This is how production runs, and the point is that the
 	// two compose. The first handshake is full, so the pin is still learned.
 	c := New(Options{BaseURL: srv.URL, AppKey: "k", RequestsPerSecond: 100})
 	transport, _ := c.http.Transport.(*http.Transport)
@@ -251,8 +251,8 @@ func TestClientResumesTLSSessions(t *testing.T) {
 		if _, err := c.GetResource(context.Background(), "light"); err != nil {
 			t.Fatalf("request %d: %v", i, err)
 		}
-		// A fresh connection each time - the >90s idle case, where a pooled
-		// connection would have been closed long before the next recall.
+		// A fresh connection each time. This is the >90s idle case, where a
+		// pooled connection would have closed long before the next recall.
 		transport.CloseIdleConnections()
 	}
 
@@ -267,13 +267,13 @@ func TestClientResumesTLSSessions(t *testing.T) {
 	}
 }
 
-// TestPinStillFailsClosedWhenSessionsResume: Go does not call
-// VerifyPeerCertificate on a resumed handshake - it restores the peer
-// certificates from the session - so the session cache moves the pin check
-// from per-connection to per-full-handshake. This is the test that says that
-// is still safe: only a peer holding the master secret of a session we already
-// pinned can resume one, so a replaced bridge gets a full handshake and the
-// check that comes with it.
+// TestPinStillFailsClosedWhenSessionsResume. Go does not call
+// VerifyPeerCertificate on a resumed handshake. It restores the peer
+// certificates from the session instead. So the session cache moves the pin
+// check from per-connection to per-full-handshake. This test says that is still
+// safe. Only a peer holding the master secret of an already-pinned session can
+// resume one, so a replaced bridge gets a full handshake and the check that
+// comes with it.
 func TestPinStillFailsClosedWhenSessionsResume(t *testing.T) {
 	certA, pinA := selfSignedCert(t)
 	certB, _ := selfSignedCert(t)
@@ -284,7 +284,7 @@ func TestPinStillFailsClosedWhenSessionsResume(t *testing.T) {
 		_, _ = w.Write([]byte(`{"data":[]}`))
 	})
 	// A fixed address, so the replacement bridge answers where the first one
-	// did - which is what makes the cached session eligible at all.
+	// did. That is what makes the cached session eligible at all.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -317,7 +317,7 @@ func TestPinStillFailsClosedWhenSessionsResume(t *testing.T) {
 		t.Fatalf("the second connection did not resume (%v); the case under test never arose", resumed)
 	}
 
-	// Same address, different key: a replaced bridge, or something pretending
+	// Same address, different key. A replaced bridge, or something pretending
 	// to be one.
 	_ = first.Close()
 	ln, err = net.Listen("tcp", addr)
@@ -337,7 +337,7 @@ func TestPinStillFailsClosedWhenSessionsResume(t *testing.T) {
 	}
 }
 
-// TestURLBracketsIPv6Literals: net/url reads "https://fe80::1/..." as the host
+// TestURLBracketsIPv6Literals. net/url reads "https://fe80::1/..." as the host
 // "fe80:" on port 1, so an IPv6 bridge.address never reached the bridge. The
 // cloud path's port branch already used net.JoinHostPort, which is how the two
 // came to disagree.
@@ -406,10 +406,10 @@ func mdnsMessage(t *testing.T, flags uint16, question string, qtype uint16, ips 
 // sends it.
 const mdnsResponse = 0x8400
 
-// TestParseARecordsChecksWhatItIsAnswering: the parser used to harvest A
+// TestParseARecordsChecksWhatItIsAnswering. The parser used to harvest A
 // records out of any datagram that reached the ephemeral port, including one
-// that was not a reply at all. Every candidate is still only a candidate -
-// Probe decides - but a stranger's answer about some other service has no
+// that was not a reply at all. Every candidate is still only a candidate, since
+// Probe decides. But a stranger's answer about some other service has no
 // business being probed.
 func TestParseARecordsChecksWhatItIsAnswering(t *testing.T) {
 	got := parseARecords(mdnsMessage(t, mdnsResponse, mdnsService, dnsTypePTR, "192.168.1.7"))
@@ -439,7 +439,7 @@ func listenUDP(t *testing.T) *net.UDPConn {
 	return conn
 }
 
-// TestCollectMDNSStopsOnCancellation: the read loop honoured ctx.Deadline but
+// TestCollectMDNSStopsOnCancellation. The read loop honored ctx.Deadline but
 // not cancellation, so Ctrl-C during `discover` sat out the whole window.
 func TestCollectMDNSStopsOnCancellation(t *testing.T) {
 	conn := listenUDP(t)
@@ -447,18 +447,18 @@ func TestCollectMDNSStopsOnCancellation(t *testing.T) {
 	cancel()
 
 	start := time.Now()
-	// A listen window far longer than the test will wait: only the
+	// A listen window far longer than the test will wait, so only the
 	// cancellation can end this.
 	_, err := collectMDNS(ctx, conn, time.Now().Add(time.Minute))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("collectMDNS returned %v, want context.Canceled", err)
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Fatalf("sat in the read for %s after the context was cancelled", elapsed)
+		t.Fatalf("sat in the read for %s after the context was canceled", elapsed)
 	}
 }
 
-// TestCollectMDNSReportsSocketErrors: a socket that failed and a window that
+// TestCollectMDNSReportsSocketErrors. A socket that failed and a window that
 // simply closed both used to end the loop silently, so Discover reported "no
 // Hue bridge found" for a network stack that had refused to play.
 func TestCollectMDNSReportsSocketErrors(t *testing.T) {
@@ -474,8 +474,8 @@ func TestCollectMDNSReportsSocketErrors(t *testing.T) {
 	}
 }
 
-// TestCollectMDNSTreatsTheDeadlineAsNormal: the window closing is how this
-// finishes, not a failure, and reporting it would put noise into the "nothing
+// TestCollectMDNSTreatsTheDeadlineAsNormal. The window closing is how this
+// finishes, not a failure. Reporting it would put noise into the "nothing
 // found" message every time.
 func TestCollectMDNSTreatsTheDeadlineAsNormal(t *testing.T) {
 	addrs, err := collectMDNS(context.Background(), listenUDP(t), time.Now().Add(20*time.Millisecond))
@@ -487,8 +487,8 @@ func TestCollectMDNSTreatsTheDeadlineAsNormal(t *testing.T) {
 	}
 }
 
-// TestCollectMDNSHarvestsAReply is the other half of the validation: the
-// checks must not turn away an answer that really is ours.
+// TestCollectMDNSHarvestsAReply is the other half of the validation. The checks
+// must not turn away an answer that really is ours.
 func TestCollectMDNSHarvestsAReply(t *testing.T) {
 	conn := listenUDP(t)
 	peer := listenUDP(t)
@@ -506,10 +506,10 @@ func TestCollectMDNSHarvestsAReply(t *testing.T) {
 	}
 }
 
-// TestPairKeepsPollingThroughTransientFailures: the pairing window is the two
-// minutes the user spends standing at the bridge, so a 503 from a bridge that
-// is busy is the likeliest error there is - and it used to abort the ceremony
-// and cost them another button press.
+// TestPairKeepsPollingThroughTransientFailures. The pairing window is the two
+// minutes the user spends standing at the bridge, so a 503 from a busy bridge
+// is the likeliest error there is. It used to abort the ceremony and cost them
+// another button press.
 func TestPairKeepsPollingThroughTransientFailures(t *testing.T) {
 	var attempts atomic.Int32
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -534,7 +534,7 @@ func TestPairKeepsPollingThroughTransientFailures(t *testing.T) {
 	}
 }
 
-// TestPairStopsOnARefusalTheBridgeSpelledOut: polling past a definite "no"
+// TestPairStopsOnARefusalTheBridgeSpelledOut. Polling past a definite "no"
 // would just burn the window and end with the wrong explanation.
 func TestPairStopsOnARefusalTheBridgeSpelledOut(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -558,7 +558,7 @@ func TestPairStopsOnARefusalTheBridgeSpelledOut(t *testing.T) {
 	}
 }
 
-// TestPairReportsWhyItGaveUp: after two minutes of an unreachable bridge, the
+// TestPairReportsWhyItGaveUp. After two minutes of an unreachable bridge, the
 // user should not be told they failed to press a button.
 func TestPairReportsWhyItGaveUp(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

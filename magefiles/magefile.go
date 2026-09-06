@@ -216,7 +216,7 @@ func stampedExample(version string, at time.Time) ([]byte, error) {
 // --- go: the Go toolchain --------------------------------------------------
 
 // Build compiles the binary for this machine. CGO_ENABLED=0 is not an
-// optimisation: it is what makes this binary the same shape as the ones
+// optimization: it is what makes this binary the same shape as the ones
 // buildTo cross-compiles. A cgo build resolves hostnames through glibc's
 // getaddrinfo, which opens an AF_NETLINK socket that the systemd unit's
 // RestrictAddressFamilies does not allow, so cloud discovery would fail under

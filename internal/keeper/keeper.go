@@ -27,21 +27,21 @@ const (
 	reasonReconnect     = "came_on_while_disconnected"
 )
 
-// maxDeviceLookups bounds how many power-restore lookups run at once. They are
-// deliberately off the dispatch goroutine, but they still share the bridge's
-// rate limiter, so a whole-house restore must not become a stampede of
+// maxDeviceLookups bounds how many power-restore lookups run at once. They
+// run off the dispatch goroutine on purpose, but they still share the
+// bridge's rate limiter. A whole-house restore must not become a stampede of
 // concurrent GETs.
 //
-// The bound is on concurrency alone. Work that does not fit waits its turn: a
-// fuse or a breaker spanning several rooms is precisely the case Trigger B
-// exists for, and dropping the rooms that arrive after the first few would lose
-// most of it.
+// The bound is on concurrency alone. Work that does not fit waits its turn.
+// A fuse or a breaker spanning several rooms is precisely the case Trigger B
+// exists for, and dropping the rooms that arrive after the first few would
+// lose most of it.
 const maxDeviceLookups = 4
 
-// deviceLookupQueue is the depth of the queue those workers drain. Lookups are
-// coalesced by group and only one per group is ever outstanding, so this is far
-// deeper than any real bridge can fill; dispatch holds the overflow rather than
-// discarding it if it ever does.
+// deviceLookupQueue is the depth of the queue those workers drain. Lookups
+// are coalesced by group and only one per group is ever outstanding, so this
+// is far deeper than any real bridge can fill. If it ever does fill,
+// dispatch holds the overflow rather than discarding it.
 const deviceLookupQueue = 256
 
 // recallQueue is the depth of the queue between dispatch and the sender. One
@@ -49,26 +49,29 @@ const deviceLookupQueue = 256
 // than any real bridge has rooms.
 const recallQueue = 256
 
-// recallBackoff is the delay before each retry of a refused recall. Its length
-// is the number of retries, so the total number of attempts is one more than
-// that: every element is used, and adding one adds an attempt. A recall the bridge rejected for a transient reason is
-// worth repeating, because the alternative is a room left in whatever state
-// something else put it in until one of its lights is next switched on by hand.
+// recallBackoff is the delay before each retry of a refused recall. Its
+// length is the number of retries, so the total number of attempts is one
+// more than that: every element is used, and adding one adds an attempt. A
+// recall the bridge rejected for a transient reason is worth repeating. The
+// alternative is a room left in whatever state something else put it in
+// until one of its lights is next switched on by hand.
 //
-// The delays are fixed rather than jittered: the client's rate limiter already
-// spaces retries out, so a house-wide wave of them queues rather than collides.
+// The delays are fixed rather than jittered. The client's rate limiter
+// already spaces retries out, so a house-wide wave of them queues rather
+// than collides.
 var recallBackoff = []time.Duration{time.Second, 3 * time.Second}
 
-// drainGrace bounds the shutdown drain: how long dispatch may go on finishing
-// the recalls it is holding after the daemon has been asked to stop.
+// drainGrace bounds the shutdown drain: how long dispatch may go on
+// finishing the recalls it is holding after the daemon has been asked to
+// stop.
 //
 // Long enough for a recall the bridge has already accepted to come back, and
-// for one it has not yet been sent to go out and be answered - a LAN round trip
-// against a healthy bridge is milliseconds. Short enough to sit well inside
-// systemd's default 90s TimeoutStopSec and launchd's 20s, and short enough that
-// nobody watching a `systemctl restart` learns to reach for kill -9. A bridge
-// that has stopped answering costs the whole of it, once, which is why it is
-// three seconds and not thirty.
+// for one not yet sent to go out and be answered. A LAN round trip against a
+// healthy bridge is milliseconds. Short enough to sit well inside systemd's
+// default 90s TimeoutStopSec and launchd's 20s, and short enough that nobody
+// watching a `systemctl restart` learns to reach for kill -9. A bridge that
+// has stopped answering costs the whole of it, once. That is why it is three
+// seconds and not thirty.
 const drainGrace = 3 * time.Second
 
 type triggerKind int
@@ -80,9 +83,9 @@ const (
 	// are actually on must still be read from the bridge.
 	kindDevice
 	// kindActivity is a light being written to without coming on: a
-	// brightness or colour change, or a light going off. It is never a reason
+	// brightness or color change, or a light going off. It is never a reason
 	// to recall anything. It is evidence that something else is still
-	// changing the room, which is a reason for a recall already waiting on
+	// changing the room. That is a reason for a recall already waiting on
 	// that room to keep waiting.
 	kindActivity
 )
@@ -91,12 +94,19 @@ type trigger struct {
 	kind   triggerKind
 	id     string
 	reason string
+
+	// at is when the event behind this trigger was seen, carried through so
+	// the recall it leads to can report an honest end-to-end time. emit stamps
+	// it for a creator that has not; a power-restore lookup pre-stamps the
+	// light trigger it emits with the device trigger's time, so the lookup's
+	// own round trips are counted rather than hidden.
+	at time.Time
 }
 
-// deviceLookup is one unit of power-restore work: the lights of a single group
-// that still need reading from the bridge. The unit is a group rather than a
-// device because a group is recalled as a whole, so however many of its lamps
-// rejoined at once, one light found on is all the answer we need.
+// deviceLookup is one unit of power-restore work: the lights of a single
+// group that still need reading from the bridge. The unit is a group rather
+// than a device because a group is recalled as a whole. However many of its
+// lamps rejoined at once, one light found on is all the answer we need.
 type deviceLookup struct {
 	groupID  string
 	lightIDs []string
@@ -126,12 +136,12 @@ type pendingRecall struct {
 	seq uint64
 
 	// fireAt is the deadline; activity in the group pushes it out. hardAt is
-	// where that pushing stops, fixed when the entry is created - with one
-	// exception, in drain: an entry deferred because its group's previous
-	// recall is still on the wire carries hardAt forward with it. So
-	// coalesce_max caps the wait for one round of coalescing, not the total
-	// time a group can spend pending. See the deferral in drain for why that
-	// is the lesser of the two evils.
+	// where that pushing stops, fixed when the entry is created. One
+	// exception lives in drain: an entry deferred because its group's
+	// previous recall is still on the wire carries hardAt forward with it.
+	// So coalesce_max caps the wait for one round of coalescing, not the
+	// total time a group can spend pending. See the deferral in drain for
+	// why that is the lesser of the two evils.
 	fireAt time.Time
 	hardAt time.Time
 
@@ -145,12 +155,12 @@ type pendingRecall struct {
 	foldedPowerRestore bool
 
 	// The suppression state to put back if the bridge refuses this recall.
-	// It has to be carried on the entry because arming and finding out are no
-	// longer the same moment - a request sits on the wire in between.
+	// It has to be carried on the entry because arming and finding out are
+	// no longer the same moment: a request sits on the wire in between.
 	//
-	// prevSuppress covers every group commit armed, which for a zone recall is
-	// more than one; armedUntil is the deadline it wrote to all of them, so
-	// rollback can tell its own window from a newer one.
+	// prevSuppress covers every group commit armed, which for a zone recall
+	// is more than one. armedUntil is the deadline it wrote to all of them,
+	// so rollback can tell its own window from a newer one.
 	prevRecall   time.Time
 	hadRecall    bool
 	armedUntil   time.Time
@@ -165,13 +175,13 @@ type groupSuppression struct {
 	had     bool
 }
 
-// skipsOnCheck reports whether commit's "is any light still on" veto does not
-// apply, because a lamp somewhere in the group came back on mains.
+// skipsOnCheck reports whether commit's "is any light still on" veto does
+// not apply, because a lamp somewhere in the group came back on mains.
 //
-// A power_restored lookup deliberately never writes what it read back into the
-// registry, so the registry has no record of the lamp returning and would veto
-// every restore. Both sources count: the reason this entry was created for,
-// and any power_restored trigger that folded into it afterwards.
+// A power_restored lookup never writes what it read back into the registry,
+// on purpose. So the registry has no record of the lamp returning and would
+// veto every restore. Both sources count: the reason this entry was created
+// for, and any power_restored trigger that folded into it afterwards.
 func (p *pendingRecall) skipsOnCheck() bool {
 	return p.foldedPowerRestore || p.reason == reasonPowerRestored
 }
@@ -216,8 +226,9 @@ type Keeper struct {
 	sendQ   chan *pendingRecall
 	results chan outcome
 	// deviceLookups carries coalesced power-restore work to the lookup
-	// workers; lookupsDone carries the group id back when a worker is finished
-	// with it, so dispatch - which owns the coalescing state - can release it.
+	// workers. lookupsDone carries the group id back when a worker is
+	// finished with it, so dispatch (which owns the coalescing state) can
+	// release it.
 	deviceLookups chan deviceLookup
 	lookupsDone   chan string
 
@@ -271,7 +282,7 @@ func New(client *hue.Client, reg *registry.Registry, cfg *config.Config, log *sl
 const streamGiveUp = 12
 
 // Run syncs the registry, then consumes the event stream until ctx is
-// cancelled. It returns ctx.Err() on shutdown, or hue.ErrStreamUnreachable if
+// canceled. It returns ctx.Err() on shutdown, or hue.ErrStreamUnreachable if
 // the bridge stopped answering at the address it was given.
 //
 // Waiting for the goroutines it started is what makes Run's return mean
@@ -287,7 +298,7 @@ func (k *Keeper) Run(ctx context.Context) error {
 	workCtx, stopWork := context.WithCancel(ctx)
 	defer stopWork()
 
-	// The sender outlives the rest by the drain's grace period. Cancelling it
+	// The sender outlives the rest by the drain's grace period. Canceling it
 	// with everything else would tear down the request already on the wire and
 	// abandon the ones the drain is about to hand it, which is the loss the
 	// drain is there to prevent. Nothing can enter sendQ once dispatch has
@@ -340,7 +351,7 @@ func (k *Keeper) Run(ctx context.Context) error {
 // worker that dies mid-item leaves its group marked busy forever, so its room
 // never gets another power-restore lookup. Swallowing the panic would leave the
 // daemon running, logging nothing further, and quietly doing none of that -
-// exactly the failure the stream's give-up behaviour exists to avoid. Dying is
+// exactly the failure the stream's give-up behavior exists to avoid. Dying is
 // what gets the service manager to restart us; the log line is so the next
 // person knows which goroutine went and why.
 func (k *Keeper) logPanic(name string) {
@@ -535,7 +546,7 @@ func (k *Keeper) handleResource(action string, raw json.RawMessage) {
 		// only happens for a genuinely new light, where acting is correct.
 		if in.On == nil || !in.On.On || (priorKnown && priorOn) {
 			// Not an edge, but still somebody writing to this light: a
-			// brightness or colour change, a light going off, or a light
+			// brightness or color change, a light going off, or a light
 			// being turned on that was already on. If its group is waiting to
 			// be recalled, that wait restarts. This is what stops us styling
 			// a room a home automation has not finished with - the late half
@@ -977,7 +988,7 @@ func (k *Keeper) queueDeviceLookup(queued map[string]*deviceLookup, t trigger) {
 }
 
 // lookupWorker drains the power-restore lookup queue. Several run at once so a
-// slow bridge cannot serialise a whole-house restore behind one room, and they
+// slow bridge cannot serialize a whole-house restore behind one room, and they
 // run off the dispatch goroutine so those reads never stall an unrelated room's
 // recall.
 func (k *Keeper) lookupWorker(ctx context.Context) {

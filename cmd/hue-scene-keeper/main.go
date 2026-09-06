@@ -1,7 +1,7 @@
 // Command hue-scene-keeper keeps Hue rooms in their all-day smart scene.
 //
-// It watches the bridge's event stream and, whenever a light comes on by any
-// means, activates that room's "Natural Light" smart scene so the bridge
+// It watches the bridge's event stream. Whenever a light comes on by any
+// means, it activates that room's "Natural Light" smart scene, so the bridge
 // carries the room through the rest of the day on its own.
 package main
 
@@ -46,8 +46,8 @@ type globals struct {
 	resetPin   bool
 
 	// configSet records that --config was given explicitly. A missing config
-	// file is fine at the default path - the zero configuration works - but at
-	// a path the user named it is a typo, and carrying on with defaults would
+	// file is fine at the default path, where the zero configuration works.
+	// At a path the user named, it is a typo. Carrying on with defaults would
 	// silently drop every exclusion they think is protecting a room.
 	configSet bool
 }
@@ -69,11 +69,11 @@ func main() {
 		if errors.As(err, &coded) {
 			os.Exit(coded.ExitStatus())
 		}
-		// Cancellation is deliberately not swallowed here: `run` unwraps it
-		// for the daemon, where a signal is how you stop it, while for the
+		// Cancellation is deliberately not swallowed here. `run` unwraps it
+		// for the daemon, where a signal is how you stop it. For the
 		// interactive commands the same error means the thing the user asked
-		// for did not happen - which a script running `auth || exit 1` has to
-		// hear about.
+		// for did not happen, and a script running `auth || exit 1` has to
+		// hear about that.
 		fmt.Fprintln(os.Stderr, "error: "+err.Error())
 		os.Exit(1)
 	}
@@ -83,11 +83,12 @@ func main() {
 // quits on the second.
 //
 // signal.NotifyContext does the first half, but its goroutine stops listening
-// once it has fired while leaving the Notify registration in place - so the
-// default disposition stays disabled and a second Ctrl-C does nothing at all
-// until the process exits on its own. That is survivable only while shutdown
-// is instant. A daemon that ignores the second interrupt is one people learn
-// to kill with -9, which is the shutdown a graceful path exists to avoid.
+// once it has fired while leaving the Notify registration in place. The
+// default disposition therefore stays disabled, and a second Ctrl-C does
+// nothing at all until the process exits on its own. That is survivable only
+// while shutdown is instant. A daemon that ignores the second interrupt is
+// one people learn to kill with -9, which is the shutdown a graceful path
+// exists to avoid.
 func signalContext(signals ...os.Signal) (context.Context, func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	// Buffered for both: the second signal may well arrive while the goroutine
@@ -109,9 +110,9 @@ func signalContext(signals ...os.Signal) (context.Context, func()) {
 	return ctx, func() { signal.Stop(ch); cancel() }
 }
 
-// bindFlags defines the flag set. Defaults come from def, so the same flags can
-// be parsed twice - once before the subcommand and once after - without the
-// second pass resetting what the first one set.
+// bindFlags defines the flag set. Defaults come from def, so the same flags
+// can be parsed twice (once before the subcommand and once after) without
+// the second pass resetting what the first one set.
 func bindFlags(fs *flag.FlagSet, g *globals, def globals) {
 	fs.StringVar(&g.configPath, "config", def.configPath, "path to config.yaml")
 	fs.StringVar(&g.statePath, "state", def.statePath, "path to credentials.json")
@@ -239,10 +240,10 @@ func run() error {
 	case "run":
 		err := cmdRun(ctx, g, log)
 		if errors.Is(err, context.Canceled) {
-			// Signalling the daemon is how it is stopped, so a cancellation
+			// Signaling the daemon is how it is stopped, so a cancellation
 			// that reached here through a request in flight is a clean exit.
-			// Only `run` gets this: for the interactive commands the same
-			// error means the work was abandoned half way.
+			// Only `run` gets this. For the interactive commands the same
+			// error means the work was abandoned halfway.
 			return nil
 		}
 		return err

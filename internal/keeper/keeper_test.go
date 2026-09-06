@@ -66,9 +66,9 @@ func startKeeper(t *testing.T, b *fake.Bridge, cfg *config.Config) (*Keeper, *re
 	return k, reg
 }
 
-// startPreparedKeeper runs an already-constructed keeper, for tests that must
-// install a hook such as the clock before the dispatch goroutine exists and
-// could race with the assignment.
+// startPreparedKeeper runs an already-constructed keeper. Some tests must
+// install a hook, such as the clock, before the dispatch goroutine exists.
+// Installing it later would race with the assignment.
 func startPreparedKeeper(t *testing.T, b *fake.Bridge, k *Keeper, reg *registry.Registry) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -115,12 +115,12 @@ func waitForRecalls(t *testing.T, b *fake.Bridge, n int) {
 // settle gives any further (unwanted) recalls time to appear.
 func settle() { time.Sleep(600 * time.Millisecond) }
 
-// commitRecall drives one recall through the admission checks and, if they
-// pass, sends it the way the sender goroutine would.
+// commitRecall drives one recall through the admission checks. If they pass,
+// it sends the recall the way the sender goroutine would.
 //
-// Recalls are dispatched asynchronously now, so a test that wants to assert on
+// Recalls are dispatched asynchronously now. A test that wants to assert on
 // what reached the bridge immediately afterwards has to close that loop
-// itself. It reports whether the recall was admitted.
+// itself. Reports whether the recall was admitted.
 func commitRecall(t *testing.T, ctx context.Context, k *Keeper, r recall) bool {
 	t.Helper()
 	p := &pendingRecall{recall: r}
@@ -147,9 +147,9 @@ func TestRecallsRoomWhenLightSwitchesOn(t *testing.T) {
 
 // TestDoesNotLoopWhenRecallTurnsOnWholeRoom is the most important test here.
 //
-// Recalling a room turns on every light in it, and the bridge reports each of
-// those as newly on. Without room-scoped suppression every one of those echoes
-// is a fresh off->on trigger and the daemon recalls forever.
+// Recalling a room turns on every light in it. The bridge reports each of
+// those lights as newly on. Without room-scoped suppression, every one of
+// those echoes is a fresh off->on trigger, and the daemon recalls forever.
 func TestDoesNotLoopWhenRecallTurnsOnWholeRoom(t *testing.T) {
 	b, lights := kitchenBridge(t)
 	b.EchoOnRecall = true
@@ -218,9 +218,10 @@ func TestExcludedRoomIsNeverRecalled(t *testing.T) {
 // carveOutBridge is the pattern the exclusion-aware resolution exists for: a
 // bedroom holding a ceiling light and a night light, a zone over just the
 // ceiling light with its own Natural Light scene, and the bedroom excluded.
-// The room cedes the ceiling light to the zone; the night light, in no zone,
-// belongs to nothing and is only ever touched by hand. The room keeps a scene
-// of its own so a recall of the wrong group would be visible, not vacuous.
+// The room cedes the ceiling light to the zone. The night light is in no
+// zone, so it belongs to nothing and is only ever touched by hand. The room
+// keeps a scene of its own, so a recall of the wrong group would be visible
+// rather than vacuous.
 func carveOutBridge(t *testing.T) (b *fake.Bridge, lights []string, cfg *config.Config) {
 	t.Helper()
 	b = fake.NewBridge(t)
@@ -1421,7 +1422,7 @@ func TestAPendingRecallIsSentAtShutdown(t *testing.T) {
 }
 
 // TestARecallOnTheWireIsNotCutOffByShutdown: the request is the sender's, and
-// cancelling it with everything else abandoned a recall the bridge had already
+// canceling it with everything else abandoned a recall the bridge had already
 // accepted - the fake stops short of applying one whose caller has gone, just
 // as a real bridge may or may not have started on it.
 func TestARecallOnTheWireIsNotCutOffByShutdown(t *testing.T) {

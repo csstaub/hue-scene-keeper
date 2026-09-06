@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 )
 
-// Credentials is the daemon's persisted trust in one bridge: the application
-// key it was issued, and the TLS key it pinned on first contact.
+// Credentials is the daemon's persisted trust in one bridge. Two things: the
+// application key it was issued, and the TLS key it pinned on first contact.
 type Credentials struct {
 	BridgeID string `json:"bridge_id,omitempty"`
 	Address  string `json:"address,omitempty"`
@@ -27,12 +27,11 @@ var ErrNoCredentials = errors.New("no credentials found; run `hue-scene-keeper a
 // saveable Credentials rather than an error, so `auth` can populate it.
 //
 // A file other users can read is warned about, not rejected. Save is
-// meticulous about 0600, but a file restored from a backup, copied between
+// meticulous about 0600. But a file restored from a backup, copied between
 // machines, or written by an older version arrives at whatever mode it arrives
 // at, and the application key it holds is the whole of the daemon's authority
 // over the bridge. Refusing to start would strand a working daemon over
-// something one chmod fixes, so this follows ssh's lead and says so loudly
-// instead.
+// something one chmod fixes. So this follows ssh's lead and says so loudly.
 func LoadCredentials(path string) (*Credentials, error) {
 	creds := &Credentials{path: path}
 	raw, err := os.ReadFile(path)
@@ -56,10 +55,10 @@ func LoadCredentials(path string) (*Credentials, error) {
 // EnsureWritable checks the credentials path can actually be written, without
 // writing anything to it.
 //
-// Pairing asks the user to press the link button and the bridge then issues an
-// application key exactly once. If storing it fails at that point the key
+// Pairing asks the user to press the link button, and the bridge then issues
+// an application key exactly once. If storing it fails at that point, the key
 // exists nowhere, the user has to press the button again, and the bridge is
-// left carrying an orphan whitelist entry - so the check belongs before the
+// left carrying an orphan whitelist entry. So the check belongs before the
 // prompt, not after the key is in hand.
 func (c *Credentials) EnsureWritable() error {
 	if c.path == "" {
@@ -81,19 +80,19 @@ func (c *Credentials) EnsureWritable() error {
 // Save writes the credentials atomically at mode 0600.
 //
 // The temporary file is created with CreateTemp rather than a predictable
-// "<path>.tmp": a fixed name is an open invitation to have the secret written
-// through a pre-planted symlink, or into a file whose permissions someone else
-// chose. Both file and directory are synced, because the whole point of this
-// daemon is surviving power cuts, and a cut just after the rename could
-// otherwise leave a zero-length credentials file and force re-pairing.
+// "<path>.tmp". A fixed name invites having the secret written through a
+// pre-planted symlink, or into a file whose permissions someone else chose.
+// Both file and directory are synced. The whole point of this daemon is
+// surviving power cuts, and a cut just after the rename could otherwise leave
+// a zero-length credentials file and force re-pairing.
 func (c *Credentials) Save() error {
 	if c.path == "" {
 		return errors.New("credentials have no path")
 	}
 	if c.AppKey == "" {
 		// Refuse to write a blank key over a working one. A read error is not
-		// permission to proceed: a file we cannot parse or open may well hold
-		// the only copy of a working key, so the interlock has to fail closed.
+		// permission to proceed. A file we cannot parse or open may hold the
+		// only copy of a working key, so the interlock fails closed.
 		existing, err := LoadCredentials(c.path)
 		switch {
 		case err != nil && !os.IsNotExist(err):

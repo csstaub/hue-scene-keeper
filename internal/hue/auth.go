@@ -54,10 +54,10 @@ func (c *Client) Pair(ctx context.Context, appName string) (string, error) {
 	case r.Error != nil && r.Error.Type == 101:
 		return "", ErrLinkButton
 	case r.Error != nil:
-		// A refusal the bridge spelled out - the whitelist is full, the body
-		// was wrong - carried in a 200 like every other CLIP application
-		// error, so it classifies as one and PairWithRetry stops on it
-		// instead of polling out the rest of the window.
+		// A refusal the bridge spelled out. The whitelist is full, or the
+		// body was wrong. It arrives in a 200 like every other CLIP
+		// application error, so it classifies as one and PairWithRetry stops
+		// on it instead of polling out the rest of the window.
 		return "", &EnvelopeError{Method: http.MethodPost, Path: "/api", Description: r.Error.Description}
 	default:
 		return "", errors.New("unexpected pairing response from bridge")
@@ -68,19 +68,19 @@ func (c *Client) Pair(ctx context.Context, appName string) (string, error) {
 // notify, if non-nil, is called before each attempt with the attempt number.
 //
 // Transient failures keep the poll going. The pairing window is the couple of
-// minutes in which the user is standing at the bridge pressing its button, so
-// a 503 from a bridge that is busy, or a connection reset because they just
-// re-plugged it, is the likeliest error there is - and giving up on one cost
-// them the whole ceremony over again. Only a refusal that will not change on
-// its own, or ctx ending, stops the loop.
+// minutes in which the user is standing at the bridge pressing its button. A
+// 503 from a busy bridge, or a connection reset because they just re-plugged
+// it, is the likeliest error there is. Giving up on one cost them the whole
+// ceremony over again. Only a refusal that will not change on its own, or ctx
+// ending, stops the loop.
 func (c *Client) PairWithRetry(ctx context.Context, appName string, interval time.Duration, notify func(attempt int)) (string, error) {
 	if interval <= 0 {
 		interval = 2 * time.Second
 	}
-	// The last transient error, kept so that running out of time after two
+	// The last transient error. Kept so that running out of time after two
 	// minutes of a refusing bridge does not report itself as the user failing
-	// to press a button. A later ErrLinkButton clears it: we reached the
-	// bridge after all, so the button really is what we are waiting on.
+	// to press a button. A later ErrLinkButton clears it. The bridge answered
+	// after all, so the button really is what the poll is waiting on.
 	var lastErr error
 	giveUp := func(cause error) error {
 		if lastErr != nil {

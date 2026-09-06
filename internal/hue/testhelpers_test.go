@@ -21,9 +21,9 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// selfSignedCert builds a bridge-like certificate a test server can serve, and
-// returns it with the base64 SHA-256 of its SubjectPublicKeyInfo - the value
-// the pin holds.
+// selfSignedCert builds a bridge-like certificate a test server can serve. It
+// returns that alongside the base64 SHA-256 of its SubjectPublicKeyInfo, which
+// is the value the pin holds.
 func selfSignedCert(t *testing.T) (tls.Certificate, string) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

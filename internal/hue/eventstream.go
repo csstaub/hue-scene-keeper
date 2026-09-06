@@ -14,48 +14,48 @@ import (
 	"time"
 )
 
-// defaultHealthyConnection is how long a stream must stay up before we stop
-// counting its loss as a consecutive failure.
+// defaultHealthyConnection is how long a stream must stay up before losing it
+// stops counting as a consecutive failure.
 const defaultHealthyConnection = 60 * time.Second
 
-// maxFrameBytes caps how much of one SSE frame we will buffer. A whole-home
-// update runs to a few hundred kilobytes, so this is orders of magnitude
-// above anything a bridge sends; it exists only so a peer that streams
-// without ever sending a newline, or data: lines without the blank line that
-// terminates the frame, cannot grow the heap until the daemon is OOM-killed.
+// maxFrameBytes caps how much of one SSE frame is buffered. A whole-home update
+// runs to a few hundred kilobytes, so this is orders of magnitude above
+// anything a bridge sends. Its only job is to stop a peer that streams without
+// ever sending a newline, or data: lines without the blank line that terminates
+// the frame, from growing the heap until the daemon is OOM-killed.
 const maxFrameBytes = 8 << 20
 
-// errFrameTooLarge reports that a frame passed maxFrameBytes. It is retryable:
-// the frame is abandoned and the connection recycled, and the resync on the
-// next connect is what puts the caller back in step.
+// errFrameTooLarge reports that a frame passed maxFrameBytes. It is retryable.
+// The frame is abandoned and the connection recycled, and the resync on the
+// next connect puts the caller back in step.
 var errFrameTooLarge = errors.New("event stream frame too large")
 
 // errStreamSilent reports that the watchdog tore the connection down because
-// the bridge stopped sending. It is retryable - the point is only to stop the
+// the bridge stopped sending. It is retryable. Its only job is to stop the
 // uptime check treating an open-but-mute connection as healthy.
 var errStreamSilent = errors.New("event stream went silent")
 
 // ErrStreamUnreachable reports that the stream failed MaxConsecutiveFailures
-// times in a row. The bridge is not answering where we are looking for it -
-// most often because its DHCP lease moved - so the caller should rediscover
-// the address rather than keep retrying the old one.
+// times in a row. The bridge is not answering at the address in use, most often
+// because its DHCP lease moved. The caller should rediscover the address rather
+// than keep retrying the old one.
 var ErrStreamUnreachable = errors.New("event stream unreachable")
 
 // StreamOptions configure the event stream reader.
 type StreamOptions struct {
-	// ReadTimeout is how long a connection may go silent before we give up on
-	// it and reconnect. Defaults to 15 minutes.
+	// ReadTimeout is how long a connection may go silent before it is given up
+	// on and reconnected. Defaults to 15 minutes.
 	//
-	// The bridge does not keepalive: a capture held open for ten minutes got a
+	// The bridge does not keepalive. A capture held open for ten minutes got a
 	// single ": hi" at connect and then nothing until a real resource change,
-	// with multi-minute gaps on a perfectly live connection. Silence is
-	// therefore normal, and a short timeout here only buys needless reconnects,
-	// each of which costs a full resync and drops whatever arrives during it.
-	// A genuinely dead peer is caught underneath us by net.Dialer.KeepAlive
-	// (30s, set in New); this timeout is only a backstop for the case TCP
-	// cannot see - the connection healthy but the bridge no longer sending.
+	// with multi-minute gaps on a perfectly live connection. Silence is normal,
+	// so a short timeout here only buys needless reconnects, each costing a
+	// full resync and dropping whatever arrives during it. A genuinely dead
+	// peer is caught underneath by net.Dialer.KeepAlive (30s, set in New). This
+	// timeout is only a backstop for what TCP cannot see: the connection
+	// healthy but the bridge no longer sending.
 	//
-	// The effective period is longer than the value set here: lastRead is
+	// The effective period is longer than the value set here. lastRead is
 	// stamped at connect and the watchdog ticks at ReadTimeout/3, so a wedge is
 	// noticed somewhere between one and one-and-a-third timeouts after it
 	// starts.
@@ -65,7 +65,7 @@ type StreamOptions struct {
 	// anything that changed while disconnected was never seen.
 	//
 	// Returning an error abandons the connection and retries with backoff.
-	// That matters: without it a failed resync would leave the caller running
+	// That matters. Without it, a failed resync leaves the caller running
 	// against an empty cache on a connection that never drops, doing nothing
 	// at all until the process is restarted.
 	OnConnect func(ctx context.Context) error
@@ -74,10 +74,10 @@ type StreamOptions struct {
 	// MaxConsecutiveFailures gives up with ErrStreamUnreachable after this
 	// many failed attempts in a row. Zero retries forever.
 	//
-	// Retrying forever is wrong when the address itself is stale: a bridge
-	// whose DHCP lease moved is never coming back at the old address, and the
-	// old behaviour was to keep trying it until someone edited the credentials
-	// file by hand - across restarts, since the address is read back from
+	// Retrying forever is wrong when the address itself is stale. A bridge
+	// whose DHCP lease moved is never coming back at the old address. The old
+	// behavior was to keep trying it until someone edited the credentials file
+	// by hand, and that survived restarts, since the address is read back from
 	// there. Giving up lets the caller rediscover.
 	MaxConsecutiveFailures int
 	// HealthyConnection is how long a connection must stay up before losing
@@ -91,14 +91,14 @@ type StreamOptions struct {
 
 // Stream consumes the bridge's server-sent event stream, reconnecting with
 // linear backoff (2s per consecutive failure, capped at 10 minutes) until ctx
-// is cancelled. It only returns on ctx cancellation.
+// is canceled. It only returns on ctx cancellation.
 //
 // handle is called for each decoded SSE frame, on the reader goroutine, so it
 // must not block for long.
 //
-// Note there is deliberately no last-event-id: the caller resyncs from the
+// Note there is deliberately no last-event-id. The caller resyncs from the
 // bridge on every connect, which is authoritative, and replayed history would
-// otherwise be indistinguishable from live events.
+// be indistinguishable from live events.
 func (c *Client) Stream(ctx context.Context, opts StreamOptions, handle func([]Event)) error {
 	log := opts.Logger
 	if log == nil {
@@ -140,7 +140,7 @@ func (c *Client) Stream(ctx context.Context, opts StreamOptions, handle func([]E
 			log.Warn("event stream ended", "err", err, "uptime", time.Since(start).Round(time.Second))
 		}
 
-		// Some failures no amount of retrying will fix: a revoked application
+		// Some failures no amount of retrying will fix. A revoked application
 		// key, or a certificate that no longer matches the pin. Retrying those
 		// forever leaves the process alive and healthy-looking while it does
 		// nothing at all, so the supervisor never learns anything is wrong.
@@ -151,12 +151,12 @@ func (c *Client) Stream(ctx context.Context, opts StreamOptions, handle func([]E
 
 		// Count consecutive failures, not lifetime disconnects. A bridge that
 		// drops a healthy connection every hour must not push the daemon
-		// towards the 10-minute cap over its first fortnight of uptime.
+		// toward the 10-minute cap over its first two weeks of uptime.
 		//
-		// A watchdog teardown is the exception: the connection was open the
-		// whole time, so it always looks "healthy" by uptime, and resetting on
-		// it would mean a bridge that accepts connections and then says
-		// nothing gets retried at full speed forever, never backing off.
+		// A watchdog teardown is the exception. The connection was open the
+		// whole time, so it always looks "healthy" by uptime. Reset on it and
+		// a bridge that accepts connections and then says nothing is retried
+		// at full speed forever, never backing off.
 		switch {
 		case errors.Is(err, errStreamSilent):
 			failures++
@@ -211,15 +211,15 @@ func (c *Client) streamOnce(
 		req.Header.Set("hue-application-key", c.appKey)
 	}
 
-	// Watchdog: the http.Client has no Timeout (that would kill the stream),
-	// so staleness is enforced here by cancelling the request context.
+	// Watchdog. The http.Client has no Timeout, since that would kill the
+	// stream, so staleness is enforced here by canceling the request context.
 	//
 	// It is armed *before* the request is sent, not after Do returns. Nothing
-	// else bounds the wait for response headers - no Timeout, and no
-	// ResponseHeaderTimeout on the transport - so a bridge that accepts the
-	// connection, completes TLS, and then never answers would otherwise block
-	// in Do forever, with the watchdog that exists to catch exactly that not
-	// yet running. The daemon would go deaf with no log line and no reconnect.
+	// else bounds the wait for response headers. No Timeout, and no
+	// ResponseHeaderTimeout on the transport. So a bridge that accepts the
+	// connection, completes TLS, and then never answers would block in Do
+	// forever, with the watchdog meant to catch exactly that not yet running.
+	// The daemon would go deaf with no log line and no reconnect.
 	var lastRead atomic.Int64
 	var silent atomic.Bool
 	lastRead.Store(time.Now().UnixNano())
@@ -255,7 +255,7 @@ func (c *Client) streamOnce(
 		return err
 	}
 
-	// Deliberately not rate limited: this is one long-lived connection, and
+	// Deliberately not rate limited. This is one long-lived connection, and
 	// spending a token here could delay a recall behind it.
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -287,7 +287,7 @@ func (c *Client) streamOnce(
 		lastRead.Store(time.Now().UnixNano())
 	}
 
-	// bufio.Reader rather than Scanner: a whole-home update can exceed
+	// bufio.Reader rather than Scanner. A whole-home update can exceed
 	// Scanner's 64KB token limit, which would silently end the stream.
 	br := bufio.NewReaderSize(stampReader{r: resp.Body, stamp: &lastRead}, 64<<10)
 	var data strings.Builder
@@ -316,10 +316,9 @@ func (c *Client) streamOnce(
 // limit bytes.
 //
 // bufio.NewReaderSize sets only the *initial* buffer, and ReadString grows
-// without bound, so a peer that sends bytes and never a newline would
-// otherwise be allowed to allocate until the process dies. ReadSlice fails
-// with ErrBufferFull instead of growing, which is what makes the accounting
-// possible.
+// without bound. A peer that sends bytes and never a newline could then
+// allocate until the process dies. ReadSlice fails with ErrBufferFull instead
+// of growing, which is what makes the accounting possible.
 func readLine(br *bufio.Reader, limit int) (string, error) {
 	var line strings.Builder
 	for {

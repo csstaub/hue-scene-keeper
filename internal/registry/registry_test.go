@@ -27,7 +27,7 @@ func apply(r *Registry, action string, msgs ...json.RawMessage) {
 }
 
 // seed builds a room containing one device that owns one light, which is how
-// real Hue lamps are modelled: a room's children are devices, not lights.
+// real Hue lamps are modeled: a room's children are devices, not lights.
 func seed(t *testing.T) *Registry {
 	t.Helper()
 	r := New()
@@ -138,7 +138,7 @@ func TestExcludedRoomCedesLightToZone(t *testing.T) {
 	}
 }
 
-// TestExcludedZoneIsSkippedInFallback: the zone loop honours exclusions, and
+// TestExcludedZoneIsSkippedInFallback: the zone loop honors exclusions, and
 // the pick among several zones stays deterministic (sorted by id).
 func TestExcludedZoneIsSkippedInFallback(t *testing.T) {
 	r := New()

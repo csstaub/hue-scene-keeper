@@ -1,6 +1,6 @@
 // Package fake implements enough of a Hue bridge to exercise the daemon
-// end-to-end in tests: the handful of resource endpoints we read, the smart
-// scene recall we write, and a scriptable SSE event stream.
+// end-to-end in tests. The handful of resource endpoints the daemon reads, the
+// smart scene recall it writes, and a scriptable SSE event stream.
 package fake
 
 import (
@@ -30,12 +30,12 @@ type Bridge struct {
 	conns   map[string]hue.ZigbeeConnectivity
 	recalls []string
 	// attempts counts every recall request the bridge answered, refusals
-	// included; recalls counts only the ones it accepted.
+	// included. recalls counts only the ones it accepted.
 	attempts int
-	// lightGets counts reads of a single light by id, which is the shape of
-	// request a power-restore lookup makes. The bulk GET the resync does is
-	// not counted: what a test wants to know is how many lamps a lookup
-	// spent a rate-limiter token on.
+	// lightGets counts reads of a single light by id, the request a
+	// power-restore lookup makes. The bulk GET the resync does is not
+	// counted. What a test wants to know is how many lamps a lookup spent a
+	// rate-limiter token on.
 	lightGets int
 	subs      map[*subscriber]struct{}
 	keepalive time.Duration
@@ -47,7 +47,7 @@ type Bridge struct {
 
 	// failures collects problems noticed on goroutines other than the test's.
 	// t.Fatalf from those calls runtime.Goexit on the wrong goroutine, which
-	// does not stop the test; they are drained in Cleanup instead.
+	// does not stop the test. They are drained in Cleanup instead.
 	failures []string
 	nextID   int
 	// failRecalls makes the next N recalls return failStatus, for exercising
@@ -58,8 +58,8 @@ type Bridge struct {
 	// exercising the client's per-request timeout.
 	recallDelay time.Duration
 
-	// EchoOnRecall reproduces the behaviour that makes loop suppression
-	// necessary: a recall turns on every light in the group, and each of
+	// EchoOnRecall reproduces the behavior that makes loop suppression
+	// necessary. A recall turns on every light in the group, and each of
 	// those lights reports itself as newly on.
 	EchoOnRecall bool
 }
@@ -89,7 +89,7 @@ func NewBridge(t *testing.T) *Bridge {
 	b.server = httptest.NewTLSServer(mux)
 	t.Cleanup(func() {
 		b.server.Close()
-		// Close does not wait for the echo goroutines: they are spawned after
+		// Close does not wait for the echo goroutines. They are spawned after
 		// the response is written, so they are not "in flight" as far as the
 		// server is concerned.
 		b.echoes.Wait()
@@ -140,7 +140,8 @@ func (b *Bridge) URL() string { return b.server.URL }
 // --- topology helpers -------------------------------------------------------
 
 // AddRoom creates a room containing one device per light name, each device
-// exposing a single light service, mirroring how real Hue lamps are modelled.
+// exposing a single light service. That mirrors how real Hue lamps are
+// modeled.
 func (b *Bridge) AddRoom(roomID, name string, lightNames ...string) []string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -228,7 +229,8 @@ func (b *Bridge) SwitchLight(lightID string, on bool) {
 	b.lights[lightID] = light
 	b.mu.Unlock()
 
-	// Real update events are partial: id, type, owner and the changed field.
+	// Real update events are partial. Just id, type, owner and the changed
+	// field.
 	b.Publish("update", map[string]any{
 		"id": lightID, "type": hue.TypeLight,
 		"owner": light.Owner,
@@ -256,7 +258,7 @@ func (b *Bridge) SetConnectivity(connID, status string) {
 	})
 }
 
-// SetLightStateSilently changes a light without publishing an event, modelling
+// SetLightStateSilently changes a light without publishing an event. It models
 // a change that happened while the daemon was disconnected.
 func (b *Bridge) SetLightStateSilently(lightID string, on bool) {
 	b.mu.Lock()
@@ -308,8 +310,8 @@ func (b *Bridge) broadcast(frame string) {
 	// One timer for the whole fan-out, reset per subscriber. time.After here
 	// would leave a live two-second timer behind for every subscriber of
 	// every frame, which a test that publishes in a loop accumulates. No
-	// drain after Stop: since Go 1.23 a reset timer cannot deliver a stale
-	// value.
+	// drain after Stop, because since Go 1.23 a reset timer cannot deliver a
+	// stale value.
 	stuck := time.NewTimer(2 * time.Second)
 	defer stuck.Stop()
 	for _, s := range subs {
@@ -348,10 +350,10 @@ func (b *Bridge) DelayRecalls(d time.Duration) {
 	b.recallDelay = d
 }
 
-// TouchLight publishes a light update that changes brightness and nothing
-// else: no "on" field at all, which is what a real bridge sends when
-// something writes to a light that is already on. It is the shape of event
-// that carries no off->on edge and so triggers nothing by itself.
+// TouchLight publishes a light update that changes brightness and nothing else.
+// No "on" field at all, which is what a real bridge sends when something writes
+// to a light that is already on. Such an event carries no off->on edge and so
+// triggers nothing by itself.
 func (b *Bridge) TouchLight(lightID string, brightness float64) {
 	b.mu.Lock()
 	light, ok := b.lights[lightID]
@@ -399,7 +401,7 @@ func (b *Bridge) Attempts() int {
 
 // LightGets reports how many times a single light has been read by id, the
 // request a power-restore lookup makes. The resync's bulk read of every light
-// does not count towards it.
+// does not count toward it.
 func (b *Bridge) LightGets() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -430,8 +432,8 @@ func (b *Bridge) WaitForSubscriber(timeout time.Duration) bool {
 
 // --- HTTP handlers ----------------------------------------------------------
 
-// knownTypes are the resource types the fake serves. Anything else is a 404,
-// as on a real bridge: answering 200 with an empty list would let a typo'd or
+// knownTypes are the resource types the fake serves. Anything else is a 404, as
+// on a real bridge. Answering 200 with an empty list would let a typo'd or
 // renamed rtype read as "this home has no lights" instead of as an error.
 var knownTypes = map[string]bool{
 	hue.TypeDevice:             true,
@@ -525,8 +527,7 @@ func (b *Bridge) handlePut(w http.ResponseWriter, r *http.Request, rtype string,
 
 	if echo && body.Recall.Action == "activate" {
 		// A real bridge turns on every light in the group, and each reports
-		// itself as newly on. This is exactly the feedback the daemon must
-		// not chase.
+		// itself as newly on. This is the feedback the daemon must not chase.
 		b.echoes.Add(1)
 		go func() {
 			defer b.echoes.Done()
@@ -675,7 +676,7 @@ func (b *Bridge) handleStream(w http.ResponseWriter, r *http.Request) {
 }
 
 // Keepalive makes the fake send SSE comment frames every d. It is off by
-// default: the real bridge does not keepalive, and a stream that is never idle
+// default. The real bridge does not keepalive, and a stream that is never idle
 // hides every bug in the code that copes with silence.
 func (b *Bridge) Keepalive(d time.Duration) {
 	b.mu.Lock()

@@ -1,6 +1,6 @@
 // Package hue is a minimal client for the Philips Hue CLIP API v2.
 //
-// It covers only what hue-scene-keeper needs: bridge discovery, link-button
+// It covers only what hue-scene-keeper needs. Bridge discovery, link-button
 // pairing, reading a handful of resource types, recalling smart scenes, and
 // consuming the bridge's server-sent event stream.
 package hue
@@ -79,8 +79,8 @@ type Device struct {
 	Services []ResourceIdentifier `json:"services,omitempty"`
 }
 
-// Group models both room and zone, which share a shape but not a meaning:
-// a room's Children are devices, a zone's Children are lights.
+// Group covers both room and zone. They are the same struct but not the same
+// idea: a room's Children are devices, a zone's Children are lights.
 type Group struct {
 	ID       string               `json:"id"`
 	Type     string               `json:"type"`
@@ -97,8 +97,9 @@ func (g Group) Name() string {
 	return g.ID
 }
 
-// SmartScene is a 24-hour scene bound to a room or zone. We only ever read its
-// name, group and state; the bridge owns timeslot selection once it is active.
+// SmartScene is a 24-hour scene bound to a room or zone. Only its name, group
+// and state are ever read. The bridge owns timeslot selection once it is
+// active.
 type SmartScene struct {
 	ID       string             `json:"id"`
 	Type     string             `json:"type"`
@@ -126,9 +127,9 @@ type ZigbeeConnectivity struct {
 
 // SmartSceneRecall is the only payload we ever write to the bridge.
 //
-// The recall object accepts nothing but an action: there is no transition
-// override, so the fade is governed by the smart scene's own
-// transition_duration as configured in the Hue app.
+// The recall object accepts nothing but an action. There is no transition
+// override, so the fade follows the smart scene's own transition_duration as
+// configured in the Hue app.
 type SmartSceneRecall struct {
 	Recall struct {
 		Action string `json:"action"`

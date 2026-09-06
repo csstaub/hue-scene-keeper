@@ -16,8 +16,8 @@ func selfSigned(t *testing.T) (der []byte, pin string) {
 	return cert.Certificate[0], pin
 }
 
-// TestPinLearnsOnFirstContact: trust-on-first-use. The bridge is self-signed,
-// so the first certificate seen is the one we commit to.
+// TestPinLearnsOnFirstContact. Trust-on-first-use. The bridge is self-signed,
+// so the first certificate seen is the one committed to.
 func TestPinLearnsOnFirstContact(t *testing.T) {
 	der, want := selfSigned(t)
 	p := NewPin("")
@@ -29,9 +29,9 @@ func TestPinLearnsOnFirstContact(t *testing.T) {
 	}
 }
 
-// TestPinRejectsADifferentCertificate: the whole point of pinning. A different
+// TestPinRejectsADifferentCertificate. The whole point of pinning. A different
 // key on the same address is either a replaced bridge or something pretending
-// to be one, and either way it must not be trusted silently.
+// to be one. Either way it must not be trusted silently.
 func TestPinRejectsADifferentCertificate(t *testing.T) {
 	_, first := selfSigned(t)
 	other, _ := selfSigned(t)
@@ -49,7 +49,7 @@ func TestPinRejectsADifferentCertificate(t *testing.T) {
 	}
 }
 
-// TestPinFailsClosed: an empty chain or an unparseable certificate must be an
+// TestPinFailsClosed. An empty chain or an unparseable certificate must be an
 // error, never a silent pass. These are the paths where failing open would
 // disable pinning altogether.
 func TestPinFailsClosed(t *testing.T) {
@@ -69,9 +69,9 @@ func TestPinFailsClosed(t *testing.T) {
 	})
 }
 
-// TestPinRefusesToTrustWhatItCannotPersist: if OnLearn fails and we kept the
-// pin in memory anyway, this process would carry on while nothing was written,
-// so every restart would silently re-enter the trust-on-first-use window.
+// TestPinRefusesToTrustWhatItCannotPersist. Keep the pin in memory after a
+// failed OnLearn and the process carries on while nothing was written. Every
+// restart then silently re-enters the trust-on-first-use window.
 func TestPinRefusesToTrustWhatItCannotPersist(t *testing.T) {
 	der, _ := selfSigned(t)
 	p := NewPin("")
@@ -85,7 +85,7 @@ func TestPinRefusesToTrustWhatItCannotPersist(t *testing.T) {
 	}
 }
 
-// TestPinLearnsOnlyOnce: concurrent handshakes serialise on the mutex, so
+// TestPinLearnsOnlyOnce. Concurrent handshakes serialize on the mutex, so
 // exactly one of them learns and the rest verify against it.
 func TestPinLearnsOnlyOnce(t *testing.T) {
 	der, want := selfSigned(t)
@@ -106,11 +106,11 @@ func TestPinLearnsOnlyOnce(t *testing.T) {
 	}
 }
 
-// TestPinDoesNotHoldItsLockAcrossOnLearn: OnLearn runs from inside the TLS
-// handshake, and it is where the pin is written to disk. Calling it under the
-// same lock Value() takes meant any callback that read its own Pin - to log
-// what it was about to store, or to compare it with what it already had -
-// wedged the handshake goroutine for good.
+// TestPinDoesNotHoldItsLockAcrossOnLearn. OnLearn runs from inside the TLS
+// handshake, and it is where the pin is written to disk. Called under the same
+// lock Value() takes, any callback that read its own Pin wedged the handshake
+// goroutine for good. Logging what it was about to store, or comparing it with
+// what it already had, was enough to do it.
 func TestPinDoesNotHoldItsLockAcrossOnLearn(t *testing.T) {
 	der, want := selfSigned(t)
 	p := NewPin("")
@@ -138,11 +138,11 @@ func TestPinDoesNotHoldItsLockAcrossOnLearn(t *testing.T) {
 	}
 }
 
-// TestPinLearnsOnlyOnceUnderConcurrentHandshakes: the value's own mutex is no
-// longer what serialises learning, so the guarantee needs a test that arrives
-// concurrently. Several connections opening at once is the ordinary case - the
-// daemon opens the event stream and its first resource GETs together - and
-// every extra OnLearn is another fsync'd write of the same value.
+// TestPinLearnsOnlyOnceUnderConcurrentHandshakes. The value's own mutex no
+// longer serializes learning, so the guarantee needs a test that arrives
+// concurrently. Several connections opening at once is the ordinary case. The
+// daemon opens the event stream and its first resource GETs together, and every
+// extra OnLearn is another fsync'd write of the same value.
 func TestPinLearnsOnlyOnceUnderConcurrentHandshakes(t *testing.T) {
 	der, want := selfSigned(t)
 	var learned atomic.Int64

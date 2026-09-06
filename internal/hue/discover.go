@@ -28,11 +28,11 @@ type BridgeInfo struct {
 }
 
 const (
-	// maxCandidates bounds how many addresses we will probe. The mDNS reply
-	// is unauthenticated UDP from anyone who can reach our ephemeral port, and
-	// a single 9KB datagram can carry ~600 A records; at eight probes in
-	// flight and a 5s timeout each, working through them all would stall
-	// startup for six minutes on a stranger's say-so.
+	// maxCandidates bounds how many addresses get probed. The mDNS reply is
+	// unauthenticated UDP from anyone who can reach the ephemeral port, and a
+	// single 9KB datagram can carry ~600 A records. At eight probes in flight
+	// and a 5s timeout each, working through them all would stall startup for
+	// six minutes on a stranger's say-so.
 	maxCandidates = 32
 	// maxProbeParallelism keeps that bounded set fast without hammering the
 	// network.
@@ -47,9 +47,9 @@ const (
 
 // Discover finds Hue bridges, preferring mDNS and falling back to Signify's
 // cloud discovery endpoint. Every candidate address is verified by reading its
-// unauthenticated /api/config, which is what keeps loose mDNS parsing from
-// offering up arbitrary hosts - though only that they look like a bridge, not
-// that they are yours. See parseARecords.
+// unauthenticated /api/config. That is what keeps loose mDNS parsing from
+// offering up arbitrary hosts. It only proves they look like a bridge, not that
+// they are yours. See parseARecords.
 func Discover(ctx context.Context, timeout time.Duration) ([]BridgeInfo, error) {
 	addrs, mdnsErr := discoverMDNS(ctx, timeout)
 	found, unreachable := probeAll(ctx, addrs, "mdns")
@@ -76,9 +76,9 @@ func Discover(ctx context.Context, timeout time.Duration) ([]BridgeInfo, error) 
 		return out, nil
 	}
 
-	// Nothing found: say which of the two mechanisms failed and how. Reporting
-	// only "no bridge found" hides the common causes - a blocked multicast
-	// route, or a bridge that answers discovery but not us.
+	// Nothing found. Say which of the two mechanisms failed and how. Reporting
+	// only "no bridge found" hides the common causes: a blocked multicast
+	// route, or a bridge that answers cloud discovery but not a direct probe.
 	var problems []string
 	if mdnsErr != nil {
 		problems = append(problems, "mdns: "+mdnsErr.Error())
@@ -109,7 +109,7 @@ func probeAll(ctx context.Context, addrs []string, source string) ([]BridgeInfo,
 	}
 	results := make([]result, len(addrs))
 
-	// One client for the whole pass: a transport per candidate would leave up
+	// One client for the whole pass. A transport per candidate would leave up
 	// to maxCandidates idle connection pools behind, each holding its sockets
 	// open for the transport's idle timeout long after discovery returned.
 	client, transport := newProbeClient()
@@ -144,7 +144,7 @@ func probeAll(ctx context.Context, addrs []string, source string) ([]BridgeInfo,
 
 // newProbeClient builds the client used for probing.
 //
-// Pre-trust: we have no pin for a bridge we have not adopted yet, and
+// Pre-trust. There is no pin for a bridge that has not been adopted yet, and
 // /api/config exposes nothing sensitive.
 func newProbeClient() (*http.Client, *http.Transport) {
 	transport := &http.Transport{
@@ -260,15 +260,15 @@ func discoverMDNS(ctx context.Context, timeout time.Duration) ([]string, error) 
 // candidate budget fills, or ctx ends.
 //
 // It returns whatever it collected alongside any error, because a partial list
-// is still worth probing. Reaching the deadline is not an error - that is the
+// is still worth probing. Reaching the deadline is not an error. That is the
 // normal way this finishes.
 func collectMDNS(ctx context.Context, conn *net.UDPConn, deadline time.Time) ([]string, error) {
 	_ = conn.SetReadDeadline(deadline)
 
-	// A deadline covers a context that expires, but not one that is cancelled:
-	// without this, Ctrl-C during `discover` sat in ReadFromUDP until the full
-	// listen window had run out. Bringing the deadline forward to now is what
-	// wakes the read; the loop then sees ctx.Err() and stops.
+	// A deadline covers a context that expires, but not one that is canceled.
+	// Without this, Ctrl-C during `discover` sat in ReadFromUDP until the full
+	// listen window ran out. Bringing the deadline forward to now wakes the
+	// read. The loop then sees ctx.Err() and stops.
 	stop := make(chan struct{})
 	defer close(stop)
 	go func() {
@@ -285,7 +285,7 @@ func collectMDNS(ctx context.Context, conn *net.UDPConn, deadline time.Time) ([]
 	for len(found) < maxCandidates {
 		n, _, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			// Three ways out, and they used to be indistinguishable: the
+			// Three ways out, and they used to be indistinguishable. The
 			// listen window closing (the normal one), the caller giving up,
 			// and the socket actually failing. Reporting the last as a silent
 			// stop left Discover saying "no Hue bridge found" with no hint
@@ -324,7 +324,7 @@ func buildQuery(name string, qtype uint16) ([]byte, error) {
 	var tail [4]byte
 	binary.BigEndian.PutUint16(tail[0:2], qtype)
 	// QCLASS IN with the unicast-response bit set, so replies come straight
-	// back to our ephemeral port rather than to the multicast group.
+	// back to this ephemeral port rather than to the multicast group.
 	binary.BigEndian.PutUint16(tail[2:4], 0x8001)
 	b.Write(tail[:])
 	return b.Bytes(), nil
@@ -343,8 +343,8 @@ func encodeName(b *bytes.Buffer, name string) error {
 }
 
 // readName decodes the name at off and returns it lower-cased and dotted,
-// along with the offset just past the name as it appears at off - which for a
-// compressed name is two bytes on, not wherever the pointer led.
+// along with the offset just past the name as it appears at off. For a
+// compressed name that is two bytes on, not wherever the pointer led.
 func readName(msg []byte, off int) (string, int, error) {
 	var name strings.Builder
 	next := -1
@@ -369,7 +369,7 @@ func readName(msg []byte, off int) (string, int, error) {
 				next = cur + 2
 			}
 			// Pointers must go backwards. Insisting on that, and on a hop
-			// budget, is what keeps a hostile datagram from looping us.
+			// budget, keeps a hostile datagram from looping the decoder.
 			hops++
 			if ptr >= cur || hops > 16 {
 				return "", 0, errors.New("bad compression pointer")
@@ -391,26 +391,26 @@ func readName(msg []byte, off int) (string, int, error) {
 // parseARecords walks every section of a DNS message and returns the IPv4
 // addresses of all A records it contains.
 //
-// It drops anything that is not a response, and anything whose question
-// section - which a responder answering our unicast query is meant to echo
-// back - asks about a service other than ours. A reply carrying no question at
-// all is still accepted: a responder is entitled to send an ordinary
-// multicast-shaped answer, and turning those away would break discovery
-// against bridges that do.
+// It drops anything that is not a response. It also drops anything whose
+// question section asks about a service other than ours, since a responder
+// answering a unicast query is meant to echo that section back. A reply
+// carrying no question at all is still accepted. A responder is entitled to
+// send an ordinary multicast-style answer, and turning those away would break
+// discovery against bridges that do.
 //
-// Past that point it still over-collects deliberately: A records from the
-// authority and additional sections are taken without checking which name they
-// belong to, because that is where a bridge's address usually rides. Probe is
-// what turns a candidate into a bridge. Note what Probe cannot do - it
-// confirms the peer answers /api/config with a bridgeid, not that it is *your*
-// bridge, so a LAN host that fakes one is an adoption candidate. That is
-// inherent to unauthenticated mDNS; the `discover` command prints the id and
-// name so the user can check them against the sticker.
+// Past that point it over-collects on purpose. A records from the authority and
+// additional sections are taken without checking which name they belong to,
+// because that is where a bridge's address usually rides. Probe is what turns a
+// candidate into a bridge. Note what Probe cannot do. It confirms the peer
+// answers /api/config with a bridgeid, not that it is *your* bridge, so a LAN
+// host that fakes one is an adoption candidate. That is inherent to
+// unauthenticated mDNS. The `discover` command prints the id and name so the
+// user can check them against the sticker.
 func parseARecords(msg []byte) []string {
 	if len(msg) < 12 {
 		return nil
 	}
-	// QR clear means someone else's query, not an answer to ours.
+	// QR clear means someone else's query, not an answer to this one.
 	if msg[2]&0x80 == 0 {
 		return nil
 	}

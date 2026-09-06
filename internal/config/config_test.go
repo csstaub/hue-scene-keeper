@@ -69,7 +69,7 @@ func TestBareSecondsAreAccepted(t *testing.T) {
 	}
 }
 
-// TestMinRecallIntervalCannotGoBelowFloor: the floor is the last defence
+// TestMinRecallIntervalCannotGoBelowFloor. The floor is the last defense
 // against a recall/event feedback loop, so it is not configurable away.
 func TestMinRecallIntervalCannotGoBelowFloor(t *testing.T) {
 	cfg, err := Load(writeConfig(t, "min_recall_interval: 1s\n"))
@@ -89,7 +89,7 @@ func TestInvalidDurationIsRejected(t *testing.T) {
 
 // fakeLookup is a stand-in for the registry. shadowed names the groups whose
 // lights all resolve elsewhere, which on a real bridge is every zone over live
-// rooms; shadowedFn, when set, answers instead and sees the exclusion
+// rooms. shadowedFn, when set, answers instead and sees the exclusion
 // predicate, for the tests where shadowing depends on what is excluded.
 type fakeLookup struct {
 	lights     []hue.Light
@@ -220,8 +220,8 @@ func TestCredentialsRoundTripWithTightPermissions(t *testing.T) {
 	}
 }
 
-// TestIneffectiveExclusionsAreReported covers the zone case: the name matches,
-// so nothing lands in Unmatched, yet rooms win in GroupForLight and the
+// TestIneffectiveExclusionsAreReported covers the zone case. The name matches,
+// so nothing lands in Unmatched. But rooms win in GroupForLight and the
 // exclusion does nothing. Silence there is worse than the typo warnings this
 // package already emits, because the config looks right.
 func TestIneffectiveExclusionsAreReported(t *testing.T) {
@@ -259,7 +259,7 @@ func TestIneffectiveExclusionsAreReported(t *testing.T) {
 			wantExcluded: "r2",
 		},
 		{
-			// A typo is Unmatched, never Ineffective: the two diagnostics say
+			// A typo is Unmatched, never Ineffective. The two diagnostics say
 			// different things and must not be conflated.
 			name:          "typo stays unmatched",
 			rooms:         []string{"Downstars"},
@@ -292,11 +292,11 @@ func TestIneffectiveExclusionsAreReported(t *testing.T) {
 	}
 }
 
-// TestIneffectiveExclusionSeesTheWholeList: effectiveness is judged under the
-// complete exclusion set with each group's own entry peeled off. A zone that
+// TestIneffectiveExclusionSeesTheWholeList. Effectiveness is judged under the
+// complete exclusion set, with each group's own entry peeled off. A zone that
 // is shadowed only while its room is live stops being ineffective the moment
-// the same config excludes that room - the carve-out pattern - and a group is
-// never judged under its own exclusion, which would find the entire list
+// the same config excludes that room. That is the carve-out pattern. A group is
+// also never judged under its own exclusion, which would find the entire list
 // ineffective.
 func TestIneffectiveExclusionSeesTheWholeList(t *testing.T) {
 	look := testLookup()
@@ -304,8 +304,8 @@ func TestIneffectiveExclusionSeesTheWholeList(t *testing.T) {
 		if excluded != nil && excluded(groupID) {
 			t.Errorf("group %s judged under its own exclusion", groupID)
 		}
-		// The zone carves lights out of the room: shadowed only while the
-		// room is live.
+		// The zone carves lights out of the room, so it is shadowed only
+		// while the room is live.
 		return groupID == "z1" && (excluded == nil || !excluded("r1"))
 	}
 
@@ -325,7 +325,7 @@ func TestIneffectiveExclusionSeesTheWholeList(t *testing.T) {
 	}
 }
 
-// TestIneffectiveExclusionMentionsTheEntry: the warning is only useful if the
+// TestIneffectiveExclusionMentionsTheEntry. The warning is only useful if the
 // user can find the line it is about.
 func TestIneffectiveExclusionMentionsTheEntry(t *testing.T) {
 	look := testLookup()
@@ -345,7 +345,7 @@ func TestIneffectiveExclusionMentionsTheEntry(t *testing.T) {
 	}
 }
 
-// TestOverrideKeysAreResolved: a misspelled override key used to fall through
+// TestOverrideKeysAreResolved. A misspelled override key used to fall through
 // to name matching with no diagnostic at all.
 func TestOverrideKeysAreResolved(t *testing.T) {
 	tests := []struct {
@@ -408,8 +408,8 @@ func TestOverrideKeysAreResolved(t *testing.T) {
 	}
 }
 
-// TestOverrideConflictResolvesToTheIDDeterministically: map iteration order is
-// randomised per range, so a coin-flip winner shows up within a few rounds.
+// TestOverrideConflictResolvesToTheIDDeterministically. Map iteration order is
+// randomized per range, so a coin-flip winner shows up within a few rounds.
 func TestOverrideConflictResolvesToTheID(t *testing.T) {
 	cfg := Default()
 	cfg.SmartSceneOverrides = map[string]string{"r1": "scene-by-id", "Bedroom": "scene-by-name"}
@@ -423,8 +423,8 @@ func TestOverrideConflictResolvesToTheID(t *testing.T) {
 	}
 }
 
-// TestOverrideTiesBreakOnTheKey: two name-shaped keys can only collide across
-// different groups, but the tiebreak must still be stable if they ever do.
+// TestOverrideTiesBreakOnTheKey. Two keys that are both names can only collide
+// across different groups. The tiebreak must still be stable if they ever do.
 func TestOverrideTiesBreakOnTheKey(t *testing.T) {
 	cfg := Default()
 	cfg.SmartSceneOverrides = map[string]string{"bedroom": "scene-a", "r1": "scene-b"}
@@ -437,8 +437,8 @@ func TestOverrideTiesBreakOnTheKey(t *testing.T) {
 	}
 }
 
-// TestDuplicateOverrideKeysAreALoadError: two keys that normalise the same are
-// unambiguously a mistake, and need no bridge to spot.
+// TestDuplicateOverrideKeysAreALoadError. Two keys that normalize the same are
+// unambiguously a mistake, and spotting them needs no bridge.
 func TestDuplicateOverrideKeysAreALoadError(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -512,7 +512,7 @@ bridge:
 	}
 }
 
-// TestCoalesceMaxIsRaisedToTheWindow: a cap below the gap it caps would fire
+// TestCoalesceMaxIsRaisedToTheWindow. A cap below the gap it caps would fire
 // every recall immediately, silently turning the debounce off. Raising it back
 // to the window is the closest honest reading of what was asked for.
 func TestCoalesceMaxIsRaisedToTheWindow(t *testing.T) {
@@ -543,10 +543,10 @@ func TestOutOfRangeTuningIsRejected(t *testing.T) {
 	}
 }
 
-// TestLoadRejectsOverrideWithNoScene: `Bedroom:` with nothing after the colon
+// TestLoadRejectsOverrideWithNoScene. `Bedroom:` with nothing after the colon
 // is a common YAML slip. It reads as an override everywhere downstream, so the
 // group takes the override branch, looks up scene id "", finds nothing, and is
-// never recalled again - with nothing but a per-recall log line to say so.
+// never recalled again. Nothing but a per-recall log line says so.
 func TestLoadRejectsOverrideWithNoScene(t *testing.T) {
 	for _, body := range []string{
 		"smart_scene_overrides:\n  Bedroom:\n",
@@ -559,7 +559,7 @@ func TestLoadRejectsOverrideWithNoScene(t *testing.T) {
 	}
 }
 
-// TestResolveOverridesReportsOneKeyMatchingSeveralGroups: a smart scene belongs
+// TestResolveOverridesReportsOneKeyMatchingSeveralGroups. A smart scene belongs
 // to one group, so a key matching two same-named rooms pins a scene that only
 // one of them can use. The other fails the scene-owns-this-group check at
 // recall time and is silently never recalled.
@@ -581,16 +581,16 @@ func TestResolveOverridesReportsOneKeyMatchingSeveralGroups(t *testing.T) {
 	}
 }
 
-// TestLoadRejectsAbsurdRecallTimers: a bare number means seconds, so someone
+// TestLoadRejectsAbsurdRecallTimers. A bare number means seconds, so someone
 // thinking in milliseconds gets ten minutes from `min_recall_interval: 600`
-// and a daemon that looks broken. Every other knob is range-checked; these two
+// and a daemon that looks broken. Every other knob is range-checked. These two
 // only had a floor.
 func TestLoadRejectsAbsurdRecallTimers(t *testing.T) {
 	for _, body := range []string{
 		"min_recall_interval: 6000\n", // meant as milliseconds
 		"recall_cooldown: 7200\n",
 		"min_recall_interval: 2h\n",
-		// Out of range: converting this to a Duration saturates on arm64 but
+		// Out of range. Converting this to a Duration saturates on arm64 but
 		// wraps negative on amd64, so the same config meant two things.
 		"min_recall_interval: 1e300\n",
 	} {
@@ -600,9 +600,9 @@ func TestLoadRejectsAbsurdRecallTimers(t *testing.T) {
 	}
 }
 
-// TestNaNRequestsPerSecondFallsBackToTheDefault: NaN satisfies neither the
-// <= 0 check nor the ceiling, so without an explicit test it survived both and
-// the derived limiter interval came out zero - no rate limiting at all.
+// TestNaNRequestsPerSecondFallsBackToTheDefault. NaN satisfies neither the
+// <= 0 check nor the ceiling. Without an explicit test it survived both and the
+// derived limiter interval came out zero, meaning no rate limiting at all.
 func TestNaNRequestsPerSecondFallsBackToTheDefault(t *testing.T) {
 	cfg, err := Load(writeConfig(t, "bridge:\n  requests_per_second: .nan\n"))
 	if err != nil {
@@ -613,10 +613,10 @@ func TestNaNRequestsPerSecondFallsBackToTheDefault(t *testing.T) {
 	}
 }
 
-// TestNegativeTuningIsRejected: every guard used to be `<= 0`, so a negative
+// TestNegativeTuningIsRejected. Every guard used to be `<= 0`, so a negative
 // was quietly replaced by the default and the daemon ran on numbers the config
-// never asked for. Zero cannot be told from absent without pointer fields, but
-// a negative is unambiguously a mistake, and this package rejects those.
+// never asked for. Zero cannot be told from absent without pointer fields. A
+// negative is unambiguously a mistake, and this package rejects those.
 func TestNegativeTuningIsRejected(t *testing.T) {
 	for _, tc := range []struct{ body, want string }{
 		{"recall_cooldown: -5s\n", "recall_cooldown"},
@@ -638,7 +638,7 @@ func TestNegativeTuningIsRejected(t *testing.T) {
 	}
 }
 
-// TestZeroTuningTakesTheDefault is the other half of the split: `0` still means
+// TestZeroTuningTakesTheDefault is the other half of the split. `0` still means
 // "default", not "off". Nothing here can distinguish a key written as 0 from
 // one that is absent, so the two must behave the same.
 func TestZeroTuningTakesTheDefault(t *testing.T) {
@@ -675,9 +675,10 @@ bridge:
 	}
 }
 
-// TestSecondYAMLDocumentIsRejected: a decoder reads one document, so a stray
+// TestSecondYAMLDocumentIsRejected. A decoder reads one document, so a stray
 // `---` turned the whole rest of the file into settings that did nothing at
-// all - the silent no-op KnownFields exists to prevent, one granularity up.
+// all. That is the silent no-op KnownFields exists to prevent, one granularity
+// up.
 func TestSecondYAMLDocumentIsRejected(t *testing.T) {
 	_, err := Load(writeConfig(t, "scene_name: a\n---\nscene_name: b\n"))
 	if err == nil {
@@ -697,10 +698,10 @@ func TestSecondYAMLDocumentIsRejected(t *testing.T) {
 	}
 }
 
-// TestCleanAddressRejectsBadHostsAndPorts: everything CleanAddress lets past is
-// spliced straight into "https://" + addr, so anything it fails to catch comes
-// back as a net/url error naming no config key - the "baffling errors much
-// later" the function exists to prevent.
+// TestCleanAddressRejectsBadHostsAndPorts. Everything CleanAddress lets past is
+// spliced straight into "https://" + addr. Anything it fails to catch comes
+// back as a net/url error naming no config key, which is the "baffling errors
+// much later" the function exists to prevent.
 func TestCleanAddressRejectsBadHostsAndPorts(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -741,10 +742,10 @@ func TestCleanAddressRejectsBadHostsAndPorts(t *testing.T) {
 	}
 }
 
-// TestBlankExclusionEntriesAreReported: a blank entry protects nothing, and
-// used to be dropped before the matching loop, so it reached neither Unmatched
-// nor Ineffective. In the one package that reports every inert config line,
-// that was the exception.
+// TestBlankExclusionEntriesAreReported. A blank entry protects nothing. It used
+// to be dropped before the matching loop, so it reached neither Unmatched nor
+// Ineffective. In the one package that reports every inert config line, that
+// was the exception.
 func TestBlankExclusionEntriesAreReported(t *testing.T) {
 	cfg := Default()
 	cfg.Exclude.Rooms = []string{"  "}
@@ -768,10 +769,10 @@ func TestBlankExclusionEntriesAreReported(t *testing.T) {
 	}
 }
 
-// TestLooseCredentialsPermissionsAreWarnedAbout: Save is meticulous about
-// 0600, but a file restored from a backup or written by an older version can
-// arrive at 0644, and loading the bridge's application key out of a
-// world-readable file in silence is the one thing this package would not say.
+// TestLooseCredentialsPermissionsAreWarnedAbout. Save is meticulous about 0600.
+// But a file restored from a backup or written by an older version can arrive
+// at 0644, and loading the bridge's application key out of a world-readable
+// file in silence is the one thing this package would not say.
 func TestLooseCredentialsPermissionsAreWarnedAbout(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "credentials.json")
 	if err := os.WriteFile(path, []byte(`{"app_key":"secret"}`), 0o644); err != nil {
@@ -806,7 +807,7 @@ func TestLooseCredentialsPermissionsAreWarnedAbout(t *testing.T) {
 	}
 }
 
-// CleanAddress has to accept its own output: auth persists the cleaned address
+// CleanAddress has to accept its own output. auth persists the cleaned address
 // into credentials.json and resolveAddress cleans it again on every start, so a
 // value the daemon wrote itself must survive the round trip. Bracketing IPv6
 // here as well as in hue.hostPort broke exactly that.
@@ -831,20 +832,20 @@ func TestCleanAddressAcceptsItsOwnOutput(t *testing.T) {
 	}
 }
 
-// TestExampleConfigSelectsNothing pins the example file's whole purpose: it is
+// TestExampleConfigSelectsNothing pins the example file's whole purpose. It is
 // a commented reference, and installing it is meant to change nothing.
 //
 // The systemd unit passes --config explicitly, and an explicit path that does
-// not exist is fatal, so a Linux install has to put a file there (`go tool
-// mage installConfig`). That file is this one. If a value in it were ever left
-// uncommented it would freeze that setting at whatever this version's default
-// happened to be, and a later release changing the default would silently not
-// reach anyone who installed before it - the failure this test exists to
-// catch, since nothing else would report it.
+// not exist is fatal, so a Linux install has to put a file there (`go tool mage
+// installConfig`). That file is this one. Leave a value in it uncommented and
+// that setting freezes at whatever this version's default happened to be. A
+// later release changing the default would then silently not reach anyone who
+// installed before it. Nothing else would report that, which is why this test
+// exists.
 //
 // The stamped copy is what installConfig actually writes: the same bytes under
 // two lines of provenance. Those live in the magefile, which carries the mage
-// build tag and so cannot be tested directly; prepending an equivalent header
+// build tag and so cannot be tested directly. Prepending an equivalent header
 // here covers the only thing about them that could break parsing.
 func TestExampleConfigSelectsNothing(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "config.example.yaml"))

@@ -76,7 +76,7 @@ func TestStreamParsesSingleFrame(t *testing.T) {
 	}
 }
 
-// TestStreamIgnoresCommentsAndBlankLines: the bridge opens every connection
+// TestStreamIgnoresCommentsAndBlankLines. The bridge opens every connection
 // with a ": hi" comment line, which must not be mistaken for a frame
 // terminator.
 func TestStreamIgnoresCommentsAndBlankLines(t *testing.T) {
@@ -110,7 +110,7 @@ func TestStreamJoinsMultipleDataLines(t *testing.T) {
 	}
 }
 
-// TestStreamHandlesFrameSplitAcrossWrites: TCP gives no framing guarantees, so
+// TestStreamHandlesFrameSplitAcrossWrites. TCP gives no framing guarantees, so
 // a frame may arrive in pieces.
 func TestStreamHandlesFrameSplitAcrossWrites(t *testing.T) {
 	srv := streamServer(t, func(w http.ResponseWriter, f http.Flusher, r *http.Request) {
@@ -129,8 +129,8 @@ func TestStreamHandlesFrameSplitAcrossWrites(t *testing.T) {
 	}
 }
 
-// TestStreamHandlesOversizedFrame guards the reason we use bufio.Reader rather
-// than bufio.Scanner: a whole-home update easily exceeds Scanner's 64KB limit,
+// TestStreamHandlesOversizedFrame guards the reason for bufio.Reader rather
+// than bufio.Scanner. A whole-home update easily exceeds Scanner's 64KB limit,
 // which would silently truncate the stream.
 func TestStreamHandlesOversizedFrame(t *testing.T) {
 	bigName := strings.Repeat("x", 300*1024)
@@ -159,13 +159,13 @@ func TestStreamHandlesOversizedFrame(t *testing.T) {
 }
 
 // TestStreamAbandonsAnEndlessFrame is the other half of the bufio.Reader
-// decision: dropping Scanner removed the silent 64KB truncation but put
-// nothing in its place, and neither ReadString nor a sized bufio.Reader caps
-// anything - the size is only the starting buffer. A peer that writes bytes
-// and never a newline, or data: lines and never the blank line that ends the
-// frame, would be buffered until the daemon was OOM-killed. Past the cap the
-// frame is abandoned and the connection recycled, which the next connect's
-// resync makes good.
+// decision. Dropping Scanner removed the silent 64KB truncation but put nothing
+// in its place. Neither ReadString nor a sized bufio.Reader caps anything, since
+// the size is only the starting buffer. A peer that writes bytes and never a
+// newline, or data: lines and never the blank line that ends the frame, would
+// be buffered until the daemon was OOM-killed. Past the cap the frame is
+// abandoned and the connection recycled, which the next connect's resync makes
+// good.
 func TestStreamAbandonsAnEndlessFrame(t *testing.T) {
 	cases := map[string]string{
 		"no newline":   strings.Repeat("x", 64<<10),
@@ -206,12 +206,11 @@ func TestStreamAbandonsAnEndlessFrame(t *testing.T) {
 	}
 }
 
-// TestStreamSendsNoLastEventID locks in a deliberate decision: the caller
+// TestStreamSendsNoLastEventID locks in a deliberate decision. The caller
 // resyncs from the bridge on every connect, which is authoritative. Asking the
-// bridge to replay history as well would deliver stale events that are
-// indistinguishable from live ones - a light that was switched on and off again
-// during the outage would be replayed as a fresh switch-on and recall a room
-// whose lights are all off.
+// bridge to replay history as well would deliver stale events indistinguishable
+// from live ones. A light switched on and off again during the outage would be
+// replayed as a fresh switch-on, recalling a room whose lights are all off.
 func TestStreamSendsNoLastEventID(t *testing.T) {
 	var mu sync.Mutex
 	var seen []string
@@ -251,7 +250,7 @@ func TestStreamSendsNoLastEventID(t *testing.T) {
 }
 
 // TestBackoffResetsAfterHealthyConnection guards a bug that only shows up after
-// days of uptime: counting lifetime disconnects rather than consecutive
+// days of uptime. Counting lifetime disconnects rather than consecutive
 // failures drives a long-running daemon to the 10-minute retry cap, so it goes
 // deaf for ten minutes after each of the bridge's routine drops.
 func TestBackoffResetsAfterHealthyConnection(t *testing.T) {
@@ -294,9 +293,9 @@ func TestBackoffResetsAfterHealthyConnection(t *testing.T) {
 	}
 }
 
-// TestOnConnectErrorDropsConnectionAndRetries covers the daemon's worst
-// failure mode: a resync that fails once must not leave it attached to a
-// healthy connection with an empty cache, silently doing nothing forever.
+// TestOnConnectErrorDropsConnectionAndRetries covers the daemon's worst failure
+// mode. A resync that fails once must not leave it attached to a healthy
+// connection with an empty cache, silently doing nothing forever.
 func TestOnConnectErrorDropsConnectionAndRetries(t *testing.T) {
 	var mu sync.Mutex
 	connects := 0
@@ -338,10 +337,10 @@ func TestOnConnectErrorDropsConnectionAndRetries(t *testing.T) {
 	}
 }
 
-// TestStreamWatchdogReconnectsOnSilence: the watchdog is the only thing that
-// notices a bridge which holds the connection open but stops sending, since
-// TCP sees nothing wrong. Its default period is deliberately long - silence is
-// normal on this bridge - so this drives it with an explicit short one.
+// TestStreamWatchdogReconnectsOnSilence. The watchdog is the only thing that
+// notices a bridge holding the connection open but sending nothing, since TCP
+// sees nothing wrong. Its default period is deliberately long, because silence
+// is normal on this bridge, so this drives it with an explicit short one.
 func TestStreamWatchdogReconnectsOnSilence(t *testing.T) {
 	var connects atomic.Int32
 	srv := streamServer(t, func(w http.ResponseWriter, f http.Flusher, r *http.Request) {
@@ -403,14 +402,14 @@ func waitUntil(t *testing.T, timeout time.Duration, cond func() bool, what strin
 	t.Fatalf("timed out waiting for %s", what)
 }
 
-// TestStreamWatchdogArmedBeforeRequest: the watchdog must be running before
-// the request is sent, not after Do returns. The client has no Timeout (it
-// would cap the stream) and the transport sets no ResponseHeaderTimeout, so a
+// TestStreamWatchdogArmedBeforeRequest. The watchdog must be running before the
+// request is sent, not after Do returns. The client has no Timeout, since that
+// would cap the stream, and the transport sets no ResponseHeaderTimeout. So a
 // bridge that accepts the connection and then never writes a status line is
 // bounded by nothing else. Arming afterwards left the daemon deaf forever with
 // no log line and no reconnect.
 func TestStreamWatchdogArmedBeforeRequest(t *testing.T) {
-	// Deliberately not streamServer: this handler never writes headers at all.
+	// Deliberately not streamServer. This handler never writes headers at all.
 	var reqs atomic.Int32
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		reqs.Add(1)
@@ -436,7 +435,7 @@ func TestStreamWatchdogArmedBeforeRequest(t *testing.T) {
 		"the watchdog to abandon a request that never got response headers")
 }
 
-// TestStreamWatchdogOpensANewConnection: cancelling the request context must
+// TestStreamWatchdogOpensANewConnection. Canceling the request context must
 // actually drop the TCP connection. Under HTTP/2 it only resets one stream and
 // returns the connection to the pool, so the reconnect lands on the same dead
 // pipe and the watchdog recovers nothing. Counting accepted connections rather
@@ -478,9 +477,9 @@ func TestStreamWatchdogOpensANewConnection(t *testing.T) {
 		"each forced reconnect to open a fresh TCP connection")
 }
 
-// TestStreamGivesUpOnPermanentRejection: a revoked application key is not
-// worth retrying. Looping on it leaves the process alive and healthy-looking
-// while it does nothing, so the service manager never learns anything is wrong.
+// TestStreamGivesUpOnPermanentRejection. A revoked application key is not worth
+// retrying. Looping on it leaves the process alive and healthy-looking while it
+// does nothing, so the service manager never learns anything is wrong.
 func TestStreamGivesUpOnPermanentRejection(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, `{"errors":[{"description":"unauthorized user"}]}`, http.StatusForbidden)
@@ -501,10 +500,10 @@ func TestStreamGivesUpOnPermanentRejection(t *testing.T) {
 	}
 }
 
-// TestStreamGivesUpAfterMaxConsecutiveFailures: a bridge that is not answering
-// where we are looking for it - typically because its DHCP lease moved - has
-// to surface as an error so the caller can rediscover, rather than being
-// retried at the old address until someone edits the credentials file.
+// TestStreamGivesUpAfterMaxConsecutiveFailures. A bridge that is not answering
+// at the address in use, typically because its DHCP lease moved, has to come
+// back as an error so the caller can rediscover. The alternative is retrying
+// the old address until someone edits the credentials file.
 func TestStreamGivesUpAfterMaxConsecutiveFailures(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "busy", http.StatusServiceUnavailable)
