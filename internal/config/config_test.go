@@ -669,7 +669,9 @@ func TestCleanAddressRejectsBadHostsAndPorts(t *testing.T) {
 		{name: "ipv4 with port", addr: "192.168.1.42:443", want: "192.168.1.42:443"},
 		{name: "hostname", addr: "hue-bridge.local", want: "hue-bridge.local"},
 		{name: "bracketed ipv6 with port", addr: "[2001:db8::1]:443", want: "[2001:db8::1]:443"},
-		{name: "bare ipv6 gets bracketed", addr: "2001:db8::1", want: "[2001:db8::1]"},
+		{name: "bare ipv6 is left bare", addr: "2001:db8::1", want: "2001:db8::1"},
+		{name: "bare ipv6 with no port", addr: "::1", want: "::1"},
+		{name: "bracketed ipv6 without a port", addr: "[2001:db8::1]", want: "[2001:db8::1]"},
 		{name: "words", addr: "hello world"},
 		{name: "port too high", addr: "192.168.1.42:99999"},
 		{name: "port zero", addr: "192.168.1.42:0"},
@@ -759,5 +761,30 @@ func TestLooseCredentialsPermissionsAreWarnedAbout(t *testing.T) {
 	}
 	if logged.Len() != 0 {
 		t.Errorf("a 0600 file must be silent, got %q", logged.String())
+	}
+}
+
+// CleanAddress has to accept its own output: auth persists the cleaned address
+// into credentials.json and resolveAddress cleans it again on every start, so a
+// value the daemon wrote itself must survive the round trip. Bracketing IPv6
+// here as well as in hue.hostPort broke exactly that.
+func TestCleanAddressAcceptsItsOwnOutput(t *testing.T) {
+	for _, in := range []string{
+		"2001:db8::1", "[2001:db8::1]", "[2001:db8::1]:443", "::1",
+		"192.168.1.42", "192.168.1.42:443", "bridge.local", "bridge.local:8443",
+	} {
+		once, err := CleanAddress(in)
+		if err != nil {
+			t.Errorf("CleanAddress(%q) = error %v; want it accepted", in, err)
+			continue
+		}
+		twice, err := CleanAddress(once)
+		if err != nil {
+			t.Errorf("CleanAddress(%q) = %q, which is then rejected: %v", in, once, err)
+			continue
+		}
+		if twice != once {
+			t.Errorf("CleanAddress is not idempotent for %q: %q then %q", in, once, twice)
+		}
 	}
 }

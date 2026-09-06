@@ -365,11 +365,12 @@ func CleanAddress(addr string) (string, error) {
 	if err := checkHost(clean); err != nil {
 		return "", fmt.Errorf("%q %w", addr, err)
 	}
-	// A bare IPv6 literal has to be bracketed before it can be spliced into a
-	// URL; unbracketed it reads as an empty host with a nonsense port.
-	if ip := net.ParseIP(clean); ip != nil && ip.To4() == nil {
-		return "[" + clean + "]", nil
-	}
+	// Deliberately returned as written, bare IPv6 literal and all. Bracketing
+	// belongs to hue.hostPort, which does it at every site that builds a URL;
+	// doing it here as well would produce "[[::1]]" and, worse, would stop this
+	// function accepting its own output - auth persists the cleaned address and
+	// resolveAddress cleans it again on every start, so a value the daemon
+	// wrote itself has to survive the round trip.
 	return clean, nil
 }
 
@@ -379,6 +380,16 @@ func CleanAddress(addr string) (string, error) {
 // names no config key at all - the baffling error CleanAddress exists to
 // prevent. Underscores are tolerated because some home routers hand them out.
 func checkHost(host string) error {
+	// An address that has already been through here, or that the user wrote
+	// the way a URL wants it, arrives bracketed. Unwrap before validating:
+	// net.ParseIP rejects the brackets, and the loop below rejects them again
+	// as characters no hostname may contain.
+	if len(host) > 1 && host[0] == '[' && host[len(host)-1] == ']' {
+		if ip := net.ParseIP(host[1 : len(host)-1]); ip != nil && ip.To4() == nil {
+			return nil
+		}
+		return errors.New("is not a host or host:port: brackets enclose only an IPv6 literal")
+	}
 	if net.ParseIP(host) != nil {
 		return nil
 	}
