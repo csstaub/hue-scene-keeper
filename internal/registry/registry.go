@@ -6,13 +6,20 @@ package registry
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
 
 	"github.com/csstaub/hue-scene-keeper/internal/hue"
 )
+
+// errNoID marks a resource the bridge returned without an id. Caching it would
+// file a zero-value resource under the "" key, where Group("") and SmartScene("")
+// then report it as found.
+var errNoID = errors.New("resource has no id")
 
 // Registry is safe for concurrent use.
 type Registry struct {
@@ -66,6 +73,9 @@ func (r *Registry) Sync(ctx context.Context, c *hue.Client) error {
 			if err := json.Unmarshal(raw, &d); err != nil {
 				return err
 			}
+			if d.ID == "" {
+				return errNoID
+			}
 			next.devices[d.ID] = d
 			return nil
 		}},
@@ -73,6 +83,9 @@ func (r *Registry) Sync(ctx context.Context, c *hue.Client) error {
 			var l hue.Light
 			if err := json.Unmarshal(raw, &l); err != nil {
 				return err
+			}
+			if l.ID == "" {
+				return errNoID
 			}
 			next.lights[l.ID] = l
 			return nil
@@ -82,6 +95,9 @@ func (r *Registry) Sync(ctx context.Context, c *hue.Client) error {
 			if err := json.Unmarshal(raw, &g); err != nil {
 				return err
 			}
+			if g.ID == "" {
+				return errNoID
+			}
 			next.rooms[g.ID] = g
 			return nil
 		}},
@@ -89,6 +105,9 @@ func (r *Registry) Sync(ctx context.Context, c *hue.Client) error {
 			var g hue.Group
 			if err := json.Unmarshal(raw, &g); err != nil {
 				return err
+			}
+			if g.ID == "" {
+				return errNoID
 			}
 			next.zones[g.ID] = g
 			return nil
@@ -98,6 +117,9 @@ func (r *Registry) Sync(ctx context.Context, c *hue.Client) error {
 			if err := json.Unmarshal(raw, &s); err != nil {
 				return err
 			}
+			if s.ID == "" {
+				return errNoID
+			}
 			next.scenes[s.ID] = s
 			return nil
 		}},
@@ -105,6 +127,9 @@ func (r *Registry) Sync(ctx context.Context, c *hue.Client) error {
 			var z hue.ZigbeeConnectivity
 			if err := json.Unmarshal(raw, &z); err != nil {
 				return err
+			}
+			if z.ID == "" {
+				return errNoID
 			}
 			next.conn[z.ID] = z
 			return nil
@@ -116,10 +141,23 @@ func (r *Registry) Sync(ctx context.Context, c *hue.Client) error {
 		if err != nil {
 			return fmt.Errorf("sync %s: %w", f.rtype, err)
 		}
+		skipped := 0
 		for _, raw := range entries {
 			if err := f.into(raw); err != nil {
-				return fmt.Errorf("sync %s: %w", f.rtype, err)
+				// One resource we cannot read must not cost us the sync.
+				// Failing here fails Resync, which drops the stream, and the
+				// same resource comes back on the reconnect - so the daemon
+				// settles at the backoff cap, connecting and dropping forever
+				// while doing nothing at all.
+				skipped++
+				slog.Warn("skipping unusable resource", "type", f.rtype, "err", err)
 			}
+		}
+		// Nothing usable in a type the bridge did return entries for is a
+		// shape change rather than one bad resource, and carrying on would
+		// leave the cache quietly empty of a whole class of resource.
+		if skipped > 0 && skipped == len(entries) {
+			return fmt.Errorf("sync %s: none of the %d entries were usable", f.rtype, len(entries))
 		}
 	}
 	next.reindex()
@@ -379,7 +417,17 @@ func (r *Registry) GroupForLight(lightID string) (hue.Group, bool) {
 }
 
 func (r *Registry) groupForLightLocked(lightID string) (hue.Group, bool) {
-	if l, ok := r.lights[lightID]; ok && l.Owner.RID != "" {
+	// A light the cache no longer holds belongs to nothing. The zone fallback
+	// below would otherwise still find it: a deleted light stays in its zone's
+	// Children until the zone itself updates, so lightToZones keeps the
+	// mapping, and the zone then reads as reachable - which is enough to
+	// silence the GroupShadowed warning the config layer prints for an
+	// exclusion that does nothing.
+	l, ok := r.lights[lightID]
+	if !ok {
+		return hue.Group{}, false
+	}
+	if l.Owner.RID != "" {
 		if roomID, ok := r.deviceToRoom[l.Owner.RID]; ok {
 			if room, ok := r.rooms[roomID]; ok {
 				return room, true

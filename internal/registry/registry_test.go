@@ -1,7 +1,13 @@
 package registry
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"path"
+	"strings"
 	"testing"
 
 	"github.com/csstaub/hue-scene-keeper/internal/hue"
@@ -246,5 +252,132 @@ func TestGroupShadowedNeedsEveryLightCovered(t *testing.T) {
 	)
 	if r.GroupShadowed("mixed") {
 		t.Error("a zone holding one roomless light is still selectable")
+	}
+}
+
+// TestDeletedLightResolvesToNoGroup: a zone still lists a deleted light among
+// its children until the zone itself updates, so the zone fallback would keep
+// resolving a light the cache no longer holds - and that makes GroupShadowed
+// read the zone as reachable, swallowing the "exclusion has no effect" warning
+// the config layer prints.
+func TestDeletedLightResolvesToNoGroup(t *testing.T) {
+	r := seed(t)
+	apply(r, "add", raw(t, hue.Group{
+		ID: "zone1", Type: hue.TypeZone,
+		Metadata: &hue.Metadata{Name: "Desk"},
+		Children: []hue.ResourceIdentifier{{RID: "light1", RType: hue.TypeLight}},
+	}))
+	apply(r, "delete", json.RawMessage(`{"id":"light1","type":"light"}`))
+
+	if group, ok := r.GroupForLight("light1"); ok {
+		t.Errorf("a deleted light still resolves to %s", group.ID)
+	}
+	if !r.GroupShadowed("zone1") {
+		t.Error("a zone whose only light is gone is not reachable; the warning must still fire")
+	}
+}
+
+// syncClient serves canned CLIP v2 envelopes for the resource types Sync
+// fetches. A type with no entries listed answers with an empty data array,
+// which is what a bridge holding none of that resource returns.
+func syncClient(t *testing.T, byType map[string][]string) *hue.Client {
+	t.Helper()
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		entries := byType[path.Base(r.URL.Path)]
+		body := fmt.Sprintf(`{"errors":[],"data":[%s]}`, strings.Join(entries, ","))
+		if _, err := w.Write([]byte(body)); err != nil {
+			t.Errorf("writing %s: %v", r.URL.Path, err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return hue.New(hue.Options{
+		BaseURL: srv.URL, AppKey: "k", Insecure: true, RequestsPerSecond: 10000,
+	})
+}
+
+// TestSyncSkipsAnUnusableResource: one resource whose shape we cannot read used
+// to fail the whole sync, which fails the resync, which drops the stream - and
+// the same resource comes back on every reconnect, so the daemon parks at the
+// backoff cap doing nothing at all.
+func TestSyncSkipsAnUnusableResource(t *testing.T) {
+	c := syncClient(t, map[string][]string{
+		hue.TypeLight: {
+			// owner as a string rather than a resource identifier, which is
+			// the shape change this guards against.
+			`{"id":"bad","type":"light","owner":"dev1"}`,
+			`{"id":"light1","type":"light","owner":{"rid":"dev1","rtype":"device"},"on":{"on":true}}`,
+		},
+		hue.TypeRoom: {
+			`{"id":"room1","type":"room","children":[{"rid":"dev1","rtype":"device"}]}`,
+		},
+	})
+
+	r := New()
+	if err := r.Sync(context.Background(), c); err != nil {
+		t.Fatalf("sync failed on one unreadable resource: %v", err)
+	}
+	if _, ok := r.Light("light1"); !ok {
+		t.Error("the readable light was dropped along with the bad one")
+	}
+	if _, ok := r.Light("bad"); ok {
+		t.Error("the unreadable light was cached")
+	}
+	// A type the bridge holds nothing of is not an error.
+	if _, rooms, zones, _ := r.Counts(); rooms != 1 || zones != 0 {
+		t.Errorf("rooms=%d zones=%d", rooms, zones)
+	}
+}
+
+// TestSyncFailsWhenAWholeTypeIsUnusable: skipping outliers must not extend to
+// pretending a resource type the bridge does hold is empty.
+func TestSyncFailsWhenAWholeTypeIsUnusable(t *testing.T) {
+	c := syncClient(t, map[string][]string{
+		hue.TypeLight: {
+			`{"id":"l1","type":"light","owner":"dev1"}`,
+			`{"id":"l2","type":"light","owner":"dev2"}`,
+		},
+	})
+
+	r := New()
+	if err := r.Sync(context.Background(), c); err == nil {
+		t.Fatal("sync succeeded with no usable light at all")
+	}
+}
+
+// TestSyncRejectsResourcesWithoutAnID: the stream path already drops these, and
+// caching one files a zero-value resource under "" where Group("") reports it
+// as found.
+func TestSyncRejectsResourcesWithoutAnID(t *testing.T) {
+	c := syncClient(t, map[string][]string{
+		hue.TypeLight: {
+			`{"type":"light","owner":{"rid":"dev1","rtype":"device"}}`,
+			`{"id":"light1","type":"light","owner":{"rid":"dev1","rtype":"device"}}`,
+		},
+		hue.TypeRoom: {
+			`{"type":"room","metadata":{"name":"Nameless"}}`,
+			`{"id":"room1","type":"room","metadata":{"name":"Kitchen"}}`,
+		},
+		hue.TypeSmartScene: {
+			`{"type":"smart_scene","group":{"rid":"room1","rtype":"room"}}`,
+			`{"id":"scene1","type":"smart_scene","group":{"rid":"room1","rtype":"room"}}`,
+		},
+	})
+
+	r := New()
+	if err := r.Sync(context.Background(), c); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if _, ok := r.Light(""); ok {
+		t.Error(`Light("") found an idless light`)
+	}
+	if _, ok := r.Group(""); ok {
+		t.Error(`Group("") found an idless room`)
+	}
+	if _, ok := r.SmartScene(""); ok {
+		t.Error(`SmartScene("") found an idless smart scene`)
+	}
+	if _, ok := r.Light("light1"); !ok {
+		t.Error("the light with an id was dropped")
 	}
 }
