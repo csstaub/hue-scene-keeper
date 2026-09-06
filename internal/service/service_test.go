@@ -3,7 +3,9 @@ package service
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -60,5 +62,45 @@ func TestProbeReportsExitStatus(t *testing.T) {
 	}
 	if probe(ctx, "definitely-not-a-real-binary-6f3a") {
 		t.Error("probe said a missing binary succeeded")
+	}
+}
+
+// TestStatusReportsNotRunningAsAnExitStatus pins the half of status a script
+// reads. The prose is for a person; a monitoring check or an `if` in a shell
+// script has only the exit status to go on, and a status command that always
+// succeeds cannot answer the question it was asked.
+//
+// It runs against whatever this machine's service manager actually says, so
+// which branch it takes depends on the machine - but both branches are
+// assertions, not skips.
+func TestStatusReportsNotRunningAsAnExitStatus(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("no service manager to ask on " + runtime.GOOS)
+	}
+	var out bytes.Buffer
+	err := Status(context.Background(), &out)
+
+	// The human-readable verdict is what tells the two cases apart, and
+	// keeping it is the point: the exit status is an addition to it, not a
+	// replacement for it.
+	switch {
+	case strings.Contains(out.String(), "recalling scenes right now"):
+		if err != nil {
+			t.Fatalf("status of a running service returned %v, want nil", err)
+		}
+	case strings.Contains(out.String(), "Nothing is recalling scenes"):
+		if err == nil {
+			t.Fatal("status of a stopped service returned nil; a script cannot tell it from a running one")
+		}
+		var coded interface{ ExitStatus() int }
+		if !errors.As(err, &coded) {
+			t.Fatalf("status returned %v, which carries no exit status", err)
+		}
+		// LSB reserves 3 for "program is not running".
+		if got := coded.ExitStatus(); got != 3 {
+			t.Errorf("exit status %d, want 3", got)
+		}
+	default:
+		t.Fatalf("status printed no verdict at all:\n%s", out.String())
 	}
 }

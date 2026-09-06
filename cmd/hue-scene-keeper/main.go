@@ -48,14 +48,61 @@ type globals struct {
 	configSet bool
 }
 
+// exitStatuser is an error that names the process's exit status itself. Its
+// message is never printed: a command returning one has already said whatever
+// it had to say, on stdout or through the flag package.
+type exitStatuser interface{ ExitStatus() int }
+
+// silent is the plain implementation of exitStatuser.
+type silent int
+
+func (s silent) Error() string   { return fmt.Sprintf("exit status %d", int(s)) }
+func (s silent) ExitStatus() int { return int(s) }
+
 func main() {
 	if err := run(); err != nil {
-		if errors.Is(err, context.Canceled) {
-			return
+		var coded exitStatuser
+		if errors.As(err, &coded) {
+			os.Exit(coded.ExitStatus())
 		}
+		// Cancellation is deliberately not swallowed here: `run` unwraps it
+		// for the daemon, where a signal is how you stop it, while for the
+		// interactive commands the same error means the thing the user asked
+		// for did not happen - which a script running `auth || exit 1` has to
+		// hear about.
 		fmt.Fprintln(os.Stderr, "error: "+err.Error())
 		os.Exit(1)
 	}
+}
+
+// signalContext cancels the returned context on the first signal and force
+// quits on the second.
+//
+// signal.NotifyContext does the first half, but its goroutine stops listening
+// once it has fired while leaving the Notify registration in place - so the
+// default disposition stays disabled and a second Ctrl-C does nothing at all
+// until the process exits on its own. That is survivable only while shutdown
+// is instant. A daemon that ignores the second interrupt is one people learn
+// to kill with -9, which is the shutdown a graceful path exists to avoid.
+func signalContext(signals ...os.Signal) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(context.Background())
+	// Buffered for both: the second signal may well arrive while the goroutine
+	// is between receives, and a dropped one is the bug being fixed here.
+	ch := make(chan os.Signal, 2)
+	signal.Notify(ch, signals...)
+	go func() {
+		<-ch
+		cancel()
+		sig := <-ch
+		fmt.Fprintf(os.Stderr, "\n%s again, quitting without finishing the shutdown\n", sig)
+		code := 1
+		if s, ok := sig.(syscall.Signal); ok {
+			// What a shell reports for a process killed by a signal.
+			code = 128 + int(s)
+		}
+		os.Exit(code)
+	}()
+	return ctx, func() { signal.Stop(ch); cancel() }
 }
 
 // bindFlags defines the flag set. Defaults come from def, so the same flags can
@@ -111,7 +158,10 @@ func run() error {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
-		return err
+		// ContinueOnError has already printed the message and the usage
+		// block. Returning the error would print it a second time, below the
+		// usage, where it reads as a second unrelated complaint.
+		return silent(1)
 	}
 
 	fs.Visit(func(f *flag.Flag) {
@@ -137,7 +187,7 @@ func run() error {
 			if errors.Is(err, flag.ErrHelp) {
 				return nil
 			}
-			return err
+			return silent(1)
 		}
 		sub.Visit(func(f *flag.Flag) {
 			if f.Name == "config" {
@@ -151,7 +201,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signalContext(os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	// Only `resolve` takes positional arguments; anywhere else they are a
@@ -173,7 +223,15 @@ func run() error {
 	case "resolve":
 		return cmdResolve(ctx, g, log, args)
 	case "run":
-		return cmdRun(ctx, g, log)
+		err := cmdRun(ctx, g, log)
+		if errors.Is(err, context.Canceled) {
+			// Signalling the daemon is how it is stopped, so a cancellation
+			// that reached here through a request in flight is a clean exit.
+			// Only `run` gets this: for the interactive commands the same
+			// error means the work was abandoned half way.
+			return nil
+		}
+		return err
 	case "start":
 		return service.Start(ctx, os.Stdout)
 	case "stop":
@@ -361,15 +419,21 @@ func cmdAuth(ctx context.Context, g globals, log *slog.Logger) error {
 	fmt.Printf("Pairing with bridge %s (%s) at %s\n", info.Name, info.ID, addr)
 	fmt.Println("Press the round link button on top of the bridge...")
 
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	pairCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
-	key, err := client.PairWithRetry(ctx, appName, 2*time.Second, func(attempt int) {
+	key, err := client.PairWithRetry(pairCtx, appName, 2*time.Second, func(attempt int) {
 		if attempt > 1 && attempt%5 == 0 {
 			fmt.Println("still waiting for the link button...")
 		}
 	})
 	if err != nil {
+		// PairWithRetry reports an interrupt as a timeout waiting for the link
+		// button, which is neither what happened nor what the user needs to
+		// read after pressing Ctrl-C.
+		if ctx.Err() != nil {
+			return errors.New("interrupted before the link button was pressed; nothing was paired")
+		}
 		return err
 	}
 
@@ -391,9 +455,14 @@ func cmdAuth(ctx context.Context, g globals, log *slog.Logger) error {
 	return nil
 }
 
-// prepare loads config, connects, and syncs the registry. Shared by the
-// read-only commands and by run.
-func prepare(ctx context.Context, g globals, log *slog.Logger) (*config.Config, *hue.Client, *registry.Registry, error) {
+// syncTimeout bounds a one-shot read of the bridge's resources. Without it a
+// bridge that accepts the connection and then goes quiet leaves a command
+// hanging with nothing on screen.
+const syncTimeout = 30 * time.Second
+
+// connect loads config and builds a client and an empty registry. It stops
+// short of syncing, because resolve syncs through the keeper instead.
+func connect(ctx context.Context, g globals, log *slog.Logger) (*config.Config, *hue.Client, *registry.Registry, error) {
 	cfg, creds, err := loadAll(g)
 	if err != nil {
 		return nil, nil, nil, err
@@ -406,10 +475,16 @@ func prepare(ctx context.Context, g globals, log *slog.Logger) (*config.Config, 
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	client := newClient(cfg, creds, addr)
+	return cfg, newClient(cfg, creds, addr), registry.New(), nil
+}
 
-	reg := registry.New()
-	syncCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+// prepare connects and syncs the registry, for the read-only commands.
+func prepare(ctx context.Context, g globals, log *slog.Logger) (*config.Config, *hue.Client, *registry.Registry, error) {
+	cfg, client, reg, err := connect(ctx, g, log)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	syncCtx, cancel := context.WithTimeout(ctx, syncTimeout)
 	defer cancel()
 	if err := reg.Sync(syncCtx, client); err != nil {
 		return nil, nil, nil, err
@@ -533,12 +608,19 @@ func cmdResolve(ctx context.Context, g globals, log *slog.Logger, args []string)
 	if len(args) == 0 {
 		return errors.New("usage: hue-scene-keeper resolve <light name or id>")
 	}
-	cfg, client, reg, err := prepare(ctx, g, log)
+	// connect, not prepare: Resync does the same full pass of rate-limited
+	// GETs that prepare's Sync would, and it is the one that also resolves the
+	// exclusion lists Explain reads. Doing both meant two passes, the second
+	// of them against the root context, so a bridge that stopped answering
+	// mid-pass left resolve hanging with no deadline at all.
+	cfg, client, reg, err := connect(ctx, g, log)
 	if err != nil {
 		return err
 	}
 	k := keeper.New(client, reg, cfg, log, true)
-	if err := k.Resync(ctx); err != nil {
+	syncCtx, cancel := context.WithTimeout(ctx, syncTimeout)
+	defer cancel()
+	if err := k.Resync(syncCtx); err != nil {
 		return err
 	}
 	fmt.Print(k.Explain(strings.Join(args, " ")))
