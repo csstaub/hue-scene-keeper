@@ -47,8 +47,9 @@ const (
 
 // Discover finds Hue bridges, preferring mDNS and falling back to Signify's
 // cloud discovery endpoint. Every candidate address is verified by reading its
-// unauthenticated /api/config, so loose mDNS parsing cannot produce a false
-// positive.
+// unauthenticated /api/config, which is what keeps loose mDNS parsing from
+// offering up arbitrary hosts - though only that they look like a bridge, not
+// that they are yours. See parseARecords.
 func Discover(ctx context.Context, timeout time.Duration) ([]BridgeInfo, error) {
 	addrs, mdnsErr := discoverMDNS(ctx, timeout)
 	found, unreachable := probeAll(ctx, addrs, "mdns")
@@ -163,7 +164,7 @@ func probe(ctx context.Context, client *http.Client, addr string) (BridgeInfo, e
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+addr+"/api/config", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+hostPort(addr)+"/api/config", nil)
 	if err != nil {
 		return BridgeInfo{}, err
 	}
@@ -219,14 +220,13 @@ func discoverCloud(ctx context.Context) ([]string, error) {
 			out = append(out, net.JoinHostPort(e.IP, strconv.Itoa(e.Port)))
 			continue
 		}
-		out = append(out, e.IP)
+		out = append(out, hostPort(e.IP))
 	}
 	return out, nil
 }
 
 // discoverMDNS sends a one-shot multicast PTR query for _hue._tcp.local and
-// gathers the A records from whatever answers, including additional records.
-// Over-collecting is safe because Probe filters the results.
+// gathers the A records from whatever answers it.
 func discoverMDNS(ctx context.Context, timeout time.Duration) ([]string, error) {
 	if timeout <= 0 {
 		timeout = 2 * time.Second
@@ -253,14 +253,50 @@ func discoverMDNS(ctx context.Context, timeout time.Duration) ([]string, error) 
 	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
 		deadline = d
 	}
+	return collectMDNS(ctx, conn, deadline)
+}
+
+// collectMDNS reads answers off conn until the listen window closes, the
+// candidate budget fills, or ctx ends.
+//
+// It returns whatever it collected alongside any error, because a partial list
+// is still worth probing. Reaching the deadline is not an error - that is the
+// normal way this finishes.
+func collectMDNS(ctx context.Context, conn *net.UDPConn, deadline time.Time) ([]string, error) {
 	_ = conn.SetReadDeadline(deadline)
 
+	// A deadline covers a context that expires, but not one that is cancelled:
+	// without this, Ctrl-C during `discover` sat in ReadFromUDP until the full
+	// listen window had run out. Bringing the deadline forward to now is what
+	// wakes the read; the loop then sees ctx.Err() and stops.
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.SetReadDeadline(time.Now())
+		case <-stop:
+		}
+	}()
+
+	var readErr error
 	found := map[string]struct{}{}
 	buf := make([]byte, 9000)
 	for len(found) < maxCandidates {
 		n, _, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			break // deadline reached
+			// Three ways out, and they used to be indistinguishable: the
+			// listen window closing (the normal one), the caller giving up,
+			// and the socket actually failing. Reporting the last as a silent
+			// stop left Discover saying "no Hue bridge found" with no hint
+			// that the network layer had refused to play.
+			var ne net.Error
+			if ctx.Err() != nil {
+				readErr = ctx.Err()
+			} else if !errors.As(err, &ne) || !ne.Timeout() {
+				readErr = fmt.Errorf("mdns read: %w", err)
+			}
+			break
 		}
 		for _, ip := range parseARecords(buf[:n]) {
 			if len(found) >= maxCandidates {
@@ -274,7 +310,7 @@ func discoverMDNS(ctx context.Context, timeout time.Duration) ([]string, error) 
 		out = append(out, ip)
 	}
 	sort.Strings(out)
-	return out, nil
+	return out, readErr
 }
 
 func buildQuery(name string, qtype uint16) ([]byte, error) {
@@ -306,34 +342,76 @@ func encodeName(b *bytes.Buffer, name string) error {
 	return nil
 }
 
-// skipName advances past a name, following compression pointers only far
-// enough to know where the name ends in the wire format.
-func skipName(msg []byte, off int) (int, error) {
-	for {
-		if off >= len(msg) {
-			return 0, errors.New("truncated name")
+// readName decodes the name at off and returns it lower-cased and dotted,
+// along with the offset just past the name as it appears at off - which for a
+// compressed name is two bytes on, not wherever the pointer led.
+func readName(msg []byte, off int) (string, int, error) {
+	var name strings.Builder
+	next := -1
+	cur := off
+	for hops := 0; ; {
+		if cur >= len(msg) {
+			return "", 0, errors.New("truncated name")
 		}
-		l := int(msg[off])
+		l := int(msg[cur])
 		switch {
 		case l == 0:
-			return off + 1, nil
-		case l&0xC0 == 0xC0:
-			if off+1 >= len(msg) {
-				return 0, errors.New("truncated compression pointer")
+			if next < 0 {
+				next = cur + 1
 			}
-			return off + 2, nil
+			return strings.ToLower(strings.TrimSuffix(name.String(), ".")), next, nil
+		case l&0xC0 == 0xC0:
+			if cur+1 >= len(msg) {
+				return "", 0, errors.New("truncated compression pointer")
+			}
+			ptr := int(binary.BigEndian.Uint16(msg[cur:cur+2]) & 0x3FFF)
+			if next < 0 {
+				next = cur + 2
+			}
+			// Pointers must go backwards. Insisting on that, and on a hop
+			// budget, is what keeps a hostile datagram from looping us.
+			hops++
+			if ptr >= cur || hops > 16 {
+				return "", 0, errors.New("bad compression pointer")
+			}
+			cur = ptr
 		case l > 63:
-			return 0, fmt.Errorf("invalid label length %d", l)
+			return "", 0, fmt.Errorf("invalid label length %d", l)
 		default:
-			off += 1 + l
+			if cur+1+l > len(msg) {
+				return "", 0, errors.New("truncated label")
+			}
+			name.Write(msg[cur+1 : cur+1+l])
+			name.WriteByte('.')
+			cur += 1 + l
 		}
 	}
 }
 
 // parseARecords walks every section of a DNS message and returns the IPv4
 // addresses of all A records it contains.
+//
+// It drops anything that is not a response, and anything whose question
+// section - which a responder answering our unicast query is meant to echo
+// back - asks about a service other than ours. A reply carrying no question at
+// all is still accepted: a responder is entitled to send an ordinary
+// multicast-shaped answer, and turning those away would break discovery
+// against bridges that do.
+//
+// Past that point it still over-collects deliberately: A records from the
+// authority and additional sections are taken without checking which name they
+// belong to, because that is where a bridge's address usually rides. Probe is
+// what turns a candidate into a bridge. Note what Probe cannot do - it
+// confirms the peer answers /api/config with a bridgeid, not that it is *your*
+// bridge, so a LAN host that fakes one is an adoption candidate. That is
+// inherent to unauthenticated mDNS; the `discover` command prints the id and
+// name so the user can check them against the sticker.
 func parseARecords(msg []byte) []string {
 	if len(msg) < 12 {
+		return nil
+	}
+	// QR clear means someone else's query, not an answer to ours.
+	if msg[2]&0x80 == 0 {
 		return nil
 	}
 	qd := int(binary.BigEndian.Uint16(msg[4:6]))
@@ -346,16 +424,24 @@ func parseARecords(msg []byte) []string {
 	off := 12
 	var err error
 	for i := 0; i < qd; i++ {
-		if off, err = skipName(msg, off); err != nil {
+		var qname string
+		if qname, off, err = readName(msg, off); err != nil {
 			return nil
 		}
+		if off+4 > len(msg) {
+			return nil
+		}
+		qtype := binary.BigEndian.Uint16(msg[off : off+2])
 		off += 4 // qtype + qclass
+		if qname != mdnsService || qtype != dnsTypePTR {
+			return nil
+		}
 	}
 
 	var out []string
 	total := counts[0] + counts[1] + counts[2]
 	for i := 0; i < total; i++ {
-		if off, err = skipName(msg, off); err != nil {
+		if _, off, err = readName(msg, off); err != nil {
 			return out
 		}
 		if off+10 > len(msg) {
