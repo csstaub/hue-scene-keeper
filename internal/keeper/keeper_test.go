@@ -821,6 +821,53 @@ func TestActivityCannotDeferPastCoalesceMax(t *testing.T) {
 	waitForRecalls(t, b, 1)
 }
 
+// TestExcludedLightActivityDoesNotDeferTheRoom: an excluded light does not
+// trigger a recall, and does not delay one either. The light people exclude is
+// typically the one that never sits still, so leaving it able to extend the
+// wait held its room at coalesce_max for as long as it chattered - the setting
+// offered to silence it left it setting the pace instead.
+func TestExcludedLightActivityDoesNotDeferTheRoom(t *testing.T) {
+	b, lights := kitchenBridge(t)
+	cfg := testConfig()
+	cfg.CoalesceWindow = config.Duration(200 * time.Millisecond)
+	cfg.CoalesceMax = config.Duration(5 * time.Second)
+	cfg.Exclude.Lights = []string{"Pantry"}
+	startKeeper(t, b, cfg)
+
+	b.SwitchLight(lights[0], true) // Ceiling: a real trigger, room now pending
+
+	// The excluded light chatters throughout, faster than the window. Without
+	// the exclusion check each touch restarts the wait and nothing is recalled
+	// until coalesce_max releases it, five seconds away.
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				b.TouchLight(lights[3], float64(1+i%100)) // Pantry
+			}
+		}
+	}()
+	t.Cleanup(func() { close(stop); <-done })
+
+	// One window is 200ms; allow generously for scheduling, but stay far below
+	// the 5s cap so a pass cannot be the cap letting it through.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(b.Recalls()) > 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("excluded light's chatter deferred the room past 2s; recalls=%v", b.Recalls())
+}
+
 // TestActivityAloneNeverRecalls: activity extends a wait, it does not start
 // one. Without that asymmetry every brightness change in the house would
 // recall its room, and a recall's own echo would feed itself.

@@ -551,6 +551,22 @@ func (k *Keeper) emitActivity(lightID string) {
 	if len(k.triggers) >= cap(k.triggers)/2 {
 		return
 	}
+	k.mu.RLock()
+	excl := k.excl
+	k.mu.RUnlock()
+	if excl.LightExcluded(lightID) {
+		// An excluded light gets no say in its room's timing, the same as it
+		// gets no say in whether the room is recalled at all. People exclude a
+		// light precisely because it will not sit still - a dynamic scene, a
+		// lamp on a failing radio - and a chatterer that kept extending the
+		// wait held its room at coalesce_max indefinitely, so the one setting
+		// offered to silence it left it setting the pace instead.
+		//
+		// The room is still styled around it: a recall caused by any other
+		// light writes the excluded one too. What it loses is the ability to
+		// defer, not its place in the scene.
+		return
+	}
 	k.emit(trigger{kind: kindActivity, id: lightID})
 }
 
