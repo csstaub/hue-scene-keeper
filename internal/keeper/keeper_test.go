@@ -1346,3 +1346,437 @@ func TestRunReturnsWhenTheStreamGivesUp(t *testing.T) {
 		t.Fatal("Run never returned after the stream gave up")
 	}
 }
+
+// --- what rollback puts back ---------------------------------------------------
+
+// resyncedKeeper builds a keeper and syncs it against the bridge without
+// starting Run, for tests that drive dispatch's own functions - commit, drain,
+// finish - by hand. Nothing else is running, so the state those functions own
+// can be read straight afterwards, and the clock hook can be set at will.
+func resyncedKeeper(t *testing.T, b *fake.Bridge, cfg *config.Config) (*Keeper, context.Context) {
+	t.Helper()
+	if cfg == nil {
+		cfg = testConfig()
+	}
+	k := New(b.Client(), registry.New(), cfg, testLogger(t), false)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	t.Cleanup(cancel)
+	if err := k.Resync(ctx); err != nil {
+		t.Fatalf("resync: %v", err)
+	}
+	return k, ctx
+}
+
+// kitchenRecall is the recall a switched-on kitchen light resolves to.
+func kitchenRecall(reason string) recall {
+	return recall{
+		groupID: "room-kitchen", groupName: "Kitchen",
+		sceneID: kitchenScene, sceneName: "Natural Light",
+		lightName: "Ceiling", reason: reason,
+	}
+}
+
+// TestAFailedRecallPutsBackTheWindowItOverwrote: rollback has two halves, and
+// only the "there was nothing there" half was ever exercised - every other
+// rollback test starts from a group that has never been recalled. A room
+// recalled a moment ago already holds a suppression window and a recall floor,
+// and the next recall for it overwrites both before its request goes out.
+// Deleting them when the bridge refuses it strips the earlier recall's window
+// while that recall's own echo is still arriving, and the room is left chasing
+// the lights it just turned on.
+func TestAFailedRecallPutsBackTheWindowItOverwrote(t *testing.T) {
+	b, lights := kitchenBridge(t)
+	// Something has to be on, or commit vetoes both recalls before arming.
+	b.SetLightStateSilently(lights[0], true)
+
+	cfg := testConfig()
+	// Longer than the recall floor, so the first recall's window is still open
+	// when the second one is committed and refused.
+	cfg.RecallCooldown = config.Duration(time.Minute)
+	k, ctx := resyncedKeeper(t, b, cfg)
+
+	base := time.Now()
+	now := base
+	k.now = func() time.Time { return now }
+
+	r := kitchenRecall(reasonSwitchedOn)
+	if !commitRecall(t, ctx, k, r) {
+		t.Fatal("the first recall should have gone through")
+	}
+
+	// Past the recall floor, so a second recall is admitted, but well inside
+	// the cooldown the first one armed.
+	now = base.Add(config.MinRecallFloor + time.Second)
+	b.FailNextRecalls(1)
+	if commitRecall(t, ctx, k, r) {
+		t.Fatal("the bridge was supposed to refuse the second recall")
+	}
+
+	if got, ok := k.lastRecall["room-kitchen"]; !ok || !got.Equal(base) {
+		t.Fatalf("rollback did not put the earlier recall time back: got %v (present=%v), want %v",
+			got, ok, base)
+	}
+	if got, ok := k.suppressUntil["room-kitchen"]; !ok || !got.Equal(base.Add(time.Minute)) {
+		t.Fatalf("rollback did not put the earlier suppression window back: got %v (present=%v), want %v",
+			got, ok, base.Add(time.Minute))
+	}
+	// What that window is for: the first recall lit the whole room, and those
+	// lights are still reporting themselves on.
+	if _, ok := k.resolve(trigger{kind: kindLight, id: lights[1], reason: reasonSwitchedOn}); ok {
+		t.Fatal("a refused recall unsuppressed the room while the earlier recall's echo was still arriving")
+	}
+}
+
+// TestAFailedZoneRecallLeavesANewerWindowAlone: rollback puts back what commit
+// found, unless something newer has armed the group since. A zone recall arms
+// every room its echo can be attributed to, and inFlight does not protect those
+// rooms - each of them can be recalled in its own right while the zone's
+// request is still on the wire. Restoring the older value there would strip a
+// window holding a live echo off, which is the loop the window exists to stop.
+func TestAFailedZoneRecallLeavesANewerWindowAlone(t *testing.T) {
+	b, kitchen, _ := mixedZoneBridge(t)
+	b.SetLightStateSilently(kitchen[0], true)
+	k, _ := resyncedKeeper(t, b, nil)
+
+	zone := &pendingRecall{recall: recall{
+		groupID: "zone-downstairs", groupName: "Downstairs",
+		sceneID: zoneScene, sceneName: "Natural Light", reason: reasonSwitchedOn,
+	}}
+	if !k.commit(zone) {
+		t.Fatal("the zone recall should have been admitted")
+	}
+	<-k.sendQ
+	if _, ok := k.suppressUntil["room-kitchen"]; !ok {
+		t.Fatal("commit armed the zone but not the room its echo is attributed to")
+	}
+
+	// The kitchen is recalled in its own right while the zone's request is
+	// still out, which arms a fresher window on the room.
+	room := &pendingRecall{recall: kitchenRecall(reasonSwitchedOn)}
+	if !k.commit(room) {
+		t.Fatal("a room in the zone should still be recallable while the zone is on the wire")
+	}
+	<-k.sendQ
+	newer := k.suppressUntil["room-kitchen"]
+
+	// Only now does the bridge refuse the zone recall.
+	k.finish(map[string]*pendingRecall{}, outcome{pending: zone, err: fmt.Errorf("bridge said no")})
+
+	if got, ok := k.suppressUntil["room-kitchen"]; !ok || !got.Equal(newer) {
+		t.Fatalf("the zone's rollback trampled the room's own window: got %v (present=%v), want %v",
+			got, ok, newer)
+	}
+	if _, ok := k.suppressUntil["zone-downstairs"]; ok {
+		t.Fatal("the refused zone recall stayed suppressed")
+	}
+}
+
+// --- a recall deferred behind one on the wire ----------------------------------
+
+// TestADeferredRecallGetsAFreshWindowAndCarriesItsCap covers what drain does
+// with a group whose previous recall is still on the wire, and the one place
+// coalesce_max deliberately does not hold.
+//
+// The entry is not committed - two entries fighting over one group's
+// suppression state is exactly what inFlight exists to prevent - and it is not
+// left with a deadline in the past either, so it gets a fresh window. Carrying
+// hardAt forward with it is deliberate: a burst turning lights on is what put
+// the recall on the wire in the first place, so activity is usually still
+// arriving, and an entry whose cap sits behind its deadline can never be
+// deferred by it again. The cost is bounded by one round trip per deferral.
+func TestADeferredRecallGetsAFreshWindowAndCarriesItsCap(t *testing.T) {
+	b, _ := kitchenBridge(t)
+	cfg := testConfig()
+	cfg.CoalesceWindow = config.Duration(200 * time.Millisecond)
+	cfg.CoalesceMax = config.Duration(5 * time.Second)
+	window := cfg.CoalesceWindow.Duration()
+	k, _ := resyncedKeeper(t, b, cfg)
+
+	k.inFlight["room-kitchen"] = true
+
+	// An entry whose cap is still ahead of it: the cap stays where it was, and
+	// the entry goes on coalescing up to it.
+	cap0 := schedNow().Add(5 * time.Second)
+	p := &pendingRecall{recall: kitchenRecall(reasonSwitchedOn), hardAt: cap0}
+	p.fireAt = schedNow().Add(-time.Millisecond)
+	pending := map[string]*pendingRecall{"room-kitchen": p}
+
+	before := schedNow()
+	k.drain(pending)
+	after := schedNow()
+
+	if pending["room-kitchen"] != p {
+		t.Fatal("an entry was committed behind a recall already on the wire for its group")
+	}
+	if len(k.sendQ) != 0 || len(b.Recalls()) != 0 {
+		t.Fatalf("a second recall was stacked behind one in flight: queued=%d sent=%v",
+			len(k.sendQ), b.Recalls())
+	}
+	if p.fireAt.Before(before.Add(window)) || p.fireAt.After(after.Add(window)) {
+		t.Fatalf("the deferred entry did not get a fresh window: fireAt=%v, expected about %v",
+			p.fireAt, before.Add(window))
+	}
+	if !p.hardAt.Equal(cap0) {
+		t.Fatalf("a cap still ahead of the new deadline was moved: got %v want %v", p.hardAt, cap0)
+	}
+	if !k.extend(p) {
+		t.Fatal("a deferred entry with room under its cap must still be able to coalesce")
+	}
+
+	// An entry already at its cap: the cap comes forward with the deadline
+	// rather than being left behind it. This is the deferral buying one more
+	// round of coalescing, which is the decision being pinned - coalesce_max
+	// caps a round, not the total time a group can spend pending.
+	spent := schedNow().Add(-time.Second)
+	q := &pendingRecall{recall: kitchenRecall(reasonSwitchedOn), fireAt: spent, hardAt: spent}
+	pending["room-kitchen"] = q
+
+	k.drain(pending)
+
+	if pending["room-kitchen"] != q {
+		t.Fatal("an entry at its cap was committed while its group was still on the wire")
+	}
+	if q.hardAt.Before(q.fireAt) {
+		t.Fatalf("coalesce_max was left behind the deadline it caps: hardAt=%v fireAt=%v",
+			q.hardAt, q.fireAt)
+	}
+	if !q.hardAt.Equal(q.fireAt) {
+		t.Fatalf("the deferral bought more than the one window it is allowed: hardAt=%v fireAt=%v",
+			q.hardAt, q.fireAt)
+	}
+	if k.extend(q) {
+		t.Fatal("an entry that had already spent its cap coalesced past the window the deferral gave it")
+	}
+}
+
+// --- outcomes ------------------------------------------------------------------
+
+// TestAFailedRecallYieldsItsSlotToANewerTrigger: a refused recall is retried by
+// putting it back into pending, but only if nothing has taken the group's slot
+// meanwhile. The newer entry carries a fresher reason and trigger - and, for a
+// power restore, an exemption the older one does not have - so displacing it
+// with a stale retry would recall the room for the wrong reason and lose the
+// veto the newer entry was created to skip.
+func TestAFailedRecallYieldsItsSlotToANewerTrigger(t *testing.T) {
+	b, lights := kitchenBridge(t)
+	b.SetLightStateSilently(lights[0], true)
+	b.FailNextRecalls(1)
+	k, ctx := resyncedKeeper(t, b, nil)
+
+	p := &pendingRecall{recall: kitchenRecall(reasonSwitchedOn), seq: 1}
+	if !k.commit(p) {
+		t.Fatal("the recall should have been admitted")
+	}
+	<-k.sendQ
+	err := k.client.RecallSmartScene(ctx, p.sceneID)
+	if err == nil {
+		t.Fatal("the bridge was supposed to refuse this recall")
+	}
+	if !hue.Retryable(err) {
+		t.Fatalf("a 503 must be retryable, or this is not the branch under test: %v", err)
+	}
+
+	newer := &pendingRecall{recall: kitchenRecall(reasonPowerRestored), seq: 2, foldedPowerRestore: true}
+	pending := map[string]*pendingRecall{"room-kitchen": newer}
+
+	if k.finish(pending, outcome{pending: p, err: err}) {
+		t.Fatal("a superseded recall asked for the timer to be rearmed, having scheduled nothing")
+	}
+	if pending["room-kitchen"] != newer {
+		t.Fatal("a stale retry displaced the newer trigger waiting in the group's slot")
+	}
+	if p.attempt != 0 {
+		t.Fatalf("the superseded recall was queued as a retry anyway, attempt=%d", p.attempt)
+	}
+	if k.inFlight["room-kitchen"] {
+		t.Fatal("an answered recall left the group marked in flight, blocking the newer entry for good")
+	}
+	if len(k.suppressUntil) != 0 || len(k.lastRecall) != 0 {
+		t.Fatalf("the failed recall left the room armed, so the entry it made way for is vetoed too: suppress=%v last=%v",
+			k.suppressUntil, k.lastRecall)
+	}
+}
+
+// TestARecallTheQueueCannotTakeReleasesTheRoom: commit arms the suppression
+// window and the recall floor before it hands the recall over, so a queue that
+// cannot take it has to give both back. A sender that has stopped draining is
+// bad enough on its own; leaving the room suppressed on top of it would silence
+// it for the whole min-recall interval, with nothing on the wire that could
+// ever release it.
+func TestARecallTheQueueCannotTakeReleasesTheRoom(t *testing.T) {
+	b, lights := kitchenBridge(t)
+	b.SetLightStateSilently(lights[0], true)
+	k, _ := resyncedKeeper(t, b, nil)
+
+	// Nothing is draining sendQ here, which is the state a wedged sender
+	// leaves it in.
+	for range recallQueue {
+		k.sendQ <- &pendingRecall{}
+	}
+
+	p := &pendingRecall{recall: kitchenRecall(reasonSwitchedOn)}
+	if k.commit(p) {
+		t.Fatal("commit reported a recall it never managed to queue")
+	}
+	if got := b.Recalls(); len(got) != 0 {
+		t.Fatalf("a dropped recall reached the bridge anyway: %v", got)
+	}
+	if k.inFlight["room-kitchen"] {
+		t.Fatal("a recall that was never queued left the group marked in flight")
+	}
+	if len(k.suppressUntil) != 0 || len(k.lastRecall) != 0 {
+		t.Fatalf("a dropped recall left the room suppressed with nothing on the wire to release it: suppress=%v last=%v",
+			k.suppressUntil, k.lastRecall)
+	}
+}
+
+// --- lookups and overrides -----------------------------------------------------
+
+// TestARestoreLookupStopsAtTheFirstLampFoundOn: a group is recalled as a whole,
+// so one lamp found on is the whole answer. Reading the rest would spend
+// rate-limiter tokens - the scarce thing during the whole-house restore this
+// path exists for - to reach a conclusion already reached.
+func TestARestoreLookupStopsAtTheFirstLampFoundOn(t *testing.T) {
+	b, lights := kitchenBridge(t)
+	for _, id := range lights {
+		b.SetLightStateSilently(id, true)
+	}
+	k, ctx := resyncedKeeper(t, b, nil)
+
+	before := b.LightGets()
+	k.runLookup(ctx, deviceLookup{groupID: "room-kitchen", lightIDs: lights, reason: reasonPowerRestored})
+	if got := b.LightGets() - before; got != 1 {
+		t.Fatalf("the lookup read %d of the group's %d lamps; one found on is the whole answer",
+			got, len(lights))
+	}
+	select {
+	case tr := <-k.triggers:
+		if tr.id != lights[0] || tr.reason != reasonPowerRestored {
+			t.Fatalf("unexpected trigger %+v", tr)
+		}
+	default:
+		t.Fatal("the lookup found a lamp on and queued nothing")
+	}
+
+	// A lamp that came back off is not an answer, so the lookup reads on.
+	b.SetLightStateSilently(lights[0], false)
+	before = b.LightGets()
+	k.runLookup(ctx, deviceLookup{groupID: "room-kitchen", lightIDs: lights, reason: reasonPowerRestored})
+	if got := b.LightGets() - before; got != 2 {
+		t.Fatalf("expected the lookup to read past the lamp that came back off, got %d reads", got)
+	}
+	select {
+	case tr := <-k.triggers:
+		if tr.id != lights[1] {
+			t.Fatalf("the lookup queued %s, not the lamp it found on", tr.id)
+		}
+	default:
+		t.Fatal("the lookup read past an off lamp to an on one and queued nothing")
+	}
+}
+
+// TestALookupReadsPastALampItCannotRead: a lamp that has gone from the bridge
+// between the connectivity event and the read is not an answer, and it is not a
+// reason to abandon the rest of its group either. Giving up there would leave
+// the room unstyled by the very restore meant to recover it, with nothing left
+// to try again.
+func TestALookupReadsPastALampItCannotRead(t *testing.T) {
+	b, lights := kitchenBridge(t)
+	b.SetLightStateSilently(lights[1], true)
+	k, ctx := resyncedKeeper(t, b, nil)
+
+	k.runLookup(ctx, deviceLookup{
+		groupID:  "room-kitchen",
+		lightIDs: []string{"light-that-left", lights[1]},
+		reason:   reasonPowerRestored,
+	})
+
+	select {
+	case tr := <-k.triggers:
+		if tr.id != lights[1] {
+			t.Fatalf("the lookup queued %s, not the lamp it could read", tr.id)
+		}
+	default:
+		t.Fatal("a lamp the bridge would not report stopped the whole group's lookup")
+	}
+}
+
+// TestALookupWorkerStopsWaitingOnADepartedDispatch: lookupsDone is dispatch's
+// to drain, and by the time a shutdown reaches the workers dispatch has already
+// gone. A worker still blocked handing its group back would keep Run's wait
+// group up for good, so the daemon would never exit and the service manager
+// would end up killing it.
+func TestALookupWorkerStopsWaitingOnADepartedDispatch(t *testing.T) {
+	k := New(nil, registry.New(), testConfig(), testLogger(t), false)
+
+	// Nothing is draining lookupsDone, which is what a departed dispatch
+	// goroutine looks like from here.
+	for range cap(k.lookupsDone) {
+		k.lookupsDone <- "room-elsewhere"
+	}
+	// No lights, so the lookup itself does no work and needs no bridge.
+	k.deviceLookups <- deviceLookup{groupID: "room-kitchen", reason: reasonPowerRestored}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); k.lookupWorker(ctx) }()
+
+	waitFor(t, 5*time.Second, "the worker to take its item", func() bool {
+		return len(k.deviceLookups) == 0
+	})
+	select {
+	case <-done:
+		t.Fatal("the worker returned before it was told to stop")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a worker blocked handing its group back never noticed the shutdown")
+	}
+}
+
+// TestSmartSceneOverrideIsUsedWhenValid: both ways an override can be wrong are
+// tested; the way it is meant to be used was not. It is the only answer for a
+// room with two smart scenes on it, or one whose scene is not named by
+// scene_name, so recalling the scene it names has to work.
+func TestSmartSceneOverrideIsUsedWhenValid(t *testing.T) {
+	const evening = "scene-kitchen-evening"
+
+	b, lights := kitchenBridge(t)
+	// A second scene on the same room. Without the override the daemon picks
+	// the one named by scene_name, which is the other one.
+	b.AddSmartScene(evening, "Evening", "room-kitchen", hue.TypeRoom)
+
+	cfg := testConfig()
+	cfg.SmartSceneOverrides = map[string]string{"Kitchen": evening}
+	startKeeper(t, b, cfg)
+
+	b.SwitchLight(lights[0], true)
+	waitForRecalls(t, b, 1)
+
+	if got := b.Recalls(); len(got) != 1 || got[0] != evening {
+		t.Fatalf("expected the override's scene %s to be recalled, got %v", evening, got)
+	}
+}
+
+// TestActivityForALightWithNoGroupChangesNothing: a light the registry cannot
+// attribute - one whose room has just been deleted, or one deleted from the
+// bridge with events still in flight - has no group whose wait it could
+// extend. Activity never creates a pending entry, so there is nothing else it
+// could do with it either.
+func TestActivityForALightWithNoGroupChangesNothing(t *testing.T) {
+	b, _ := kitchenBridge(t)
+	k, _ := resyncedKeeper(t, b, nil)
+
+	pending := map[string]*pendingRecall{}
+	if k.schedule(pending, trigger{kind: kindActivity, id: "light-that-left"}) {
+		t.Fatal("activity for an unattributable light asked for the timer to be rearmed")
+	}
+	if len(pending) != 0 {
+		t.Fatalf("activity created a pending entry: %v", pending)
+	}
+}

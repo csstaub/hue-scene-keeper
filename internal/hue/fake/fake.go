@@ -31,7 +31,12 @@ type Bridge struct {
 	recalls []string
 	// attempts counts every recall request the bridge answered, refusals
 	// included; recalls counts only the ones it accepted.
-	attempts  int
+	attempts int
+	// lightGets counts reads of a single light by id, which is the shape of
+	// request a power-restore lookup makes. The bulk GET the resync does is
+	// not counted: what a test wants to know is how many lamps a lookup
+	// spent a rate-limiter token on.
+	lightGets int
 	subs      map[*subscriber]struct{}
 	keepalive time.Duration
 
@@ -392,6 +397,15 @@ func (b *Bridge) Attempts() int {
 	return b.attempts
 }
 
+// LightGets reports how many times a single light has been read by id, the
+// request a power-restore lookup makes. The resync's bulk read of every light
+// does not count towards it.
+func (b *Bridge) LightGets() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.lightGets
+}
+
 // Recalls returns the smart scene ids recalled so far, in order.
 func (b *Bridge) Recalls() []string {
 	b.mu.Lock()
@@ -445,6 +459,11 @@ func (b *Bridge) handleResource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) == 2 && parts[1] != "" {
+		if rtype == hue.TypeLight {
+			b.mu.Lock()
+			b.lightGets++
+			b.mu.Unlock()
+		}
 		b.writeEnvelope(w, b.collect(rtype, parts[1]))
 		return
 	}
