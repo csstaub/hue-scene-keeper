@@ -237,7 +237,7 @@ func run() error {
 	case "stop":
 		return service.Stop(ctx, os.Stdout)
 	case "status":
-		return service.Status(ctx, os.Stdout)
+		return service.Status(ctx, os.Stdout, service.Paths{Config: g.configPath, State: g.statePath})
 	default:
 		fs.Usage()
 		return fmt.Errorf("unknown command %q", command)

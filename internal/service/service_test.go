@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -65,6 +67,67 @@ func TestProbeReportsExitStatus(t *testing.T) {
 	}
 }
 
+// TestParseExecStart feeds the parser the shape `systemctl show -p ExecStart
+// --value` actually prints for the shipped unit, captured rather than
+// imagined, the same way TestLaunchdField pins launchctl's output.
+func TestParseExecStart(t *testing.T) {
+	show := "{ path=/usr/local/bin/hue-scene-keeper ; argv[]=/usr/local/bin/hue-scene-keeper " +
+		"--config /etc/hue-scene-keeper/config.yaml --state /var/lib/hue-scene-keeper/credentials.json run ; " +
+		"ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }"
+	config, state := parseExecStart(show)
+	if config != "/etc/hue-scene-keeper/config.yaml" {
+		t.Errorf("config = %q", config)
+	}
+	if state != "/var/lib/hue-scene-keeper/credentials.json" {
+		t.Errorf("state = %q", state)
+	}
+}
+
+func TestParseExecStartHandlesTheEqualsForm(t *testing.T) {
+	config, state := parseExecStart("{ path=/x ; argv[]=/x --config=/a.yaml --state=/b.json run ; pid=0 }")
+	if config != "/a.yaml" || state != "/b.json" {
+		t.Errorf("got %q, %q", config, state)
+	}
+}
+
+func TestParseExecStartReturnsNothingForAUnitWithoutFlags(t *testing.T) {
+	for _, show := range []string{
+		"",
+		"{ path=/usr/local/bin/hue-scene-keeper ; argv[]=/usr/local/bin/hue-scene-keeper run ; pid=0 }",
+		"not systemctl output at all",
+	} {
+		if config, state := parseExecStart(show); config != "" || state != "" {
+			t.Errorf("parseExecStart(%q) = %q, %q; want empty", show, config, state)
+		}
+	}
+}
+
+// TestPrintPathAnnotatesAMissingFile pins the annotation contract: a definite
+// absence is called out, an existing file is printed bare, and the label
+// column stays aligned with the rest of status's hand-padded output.
+func TestPrintPathAnnotatesAMissingFile(t *testing.T) {
+	dir := t.TempDir()
+	present := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(present, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	printPath(&out, "config:", present, "")
+	printPath(&out, "", filepath.Join(dir, "gone.json"), "systemd unit")
+
+	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d lines:\n%s", len(lines), out.String())
+	}
+	if want := "config:    " + present; lines[0] != want {
+		t.Errorf("present file line = %q, want %q", lines[0], want)
+	}
+	if want := "           " + filepath.Join(dir, "gone.json") + " (systemd unit, not present)"; lines[1] != want {
+		t.Errorf("missing file line = %q, want %q", lines[1], want)
+	}
+}
+
 // TestStatusReportsNotRunningAsAnExitStatus pins the half of status a script
 // reads. The prose is for a person; a monitoring check or an `if` in a shell
 // script has only the exit status to go on, and a status command that always
@@ -78,7 +141,11 @@ func TestStatusReportsNotRunningAsAnExitStatus(t *testing.T) {
 		t.Skip("no service manager to ask on " + runtime.GOOS)
 	}
 	var out bytes.Buffer
-	err := Status(context.Background(), &out)
+	dir := t.TempDir()
+	err := Status(context.Background(), &out, Paths{
+		Config: filepath.Join(dir, "config.yaml"),
+		State:  filepath.Join(dir, "credentials.json"),
+	})
 
 	// The human-readable verdict is what tells the two cases apart, and
 	// keeping it is the point: the exit status is an addition to it, not a

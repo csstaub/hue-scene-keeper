@@ -108,7 +108,7 @@ func (notRunningError) ExitStatus() int { return 3 }
 //
 // It returns notRunningError when nothing is running, so `status` can be used
 // in a monitoring check without parsing its prose.
-func Status(ctx context.Context, out io.Writer) error {
+func Status(ctx context.Context, out io.Writer, p Paths) error {
 	_, _ = fmt.Fprintf(out, "service:   launchd agent %s\n", Label)
 
 	plist, err := plistPath()
@@ -147,6 +147,17 @@ func Status(ctx context.Context, out io.Writer) error {
 		_, _ = fmt.Fprintf(out, "at login:  disabled - it will not start on its own until `%s start`\n", binName)
 	default:
 		_, _ = fmt.Fprintln(out, "at login:  starts on its own")
+	}
+
+	// The launchd agent passes no --config or --state, so the CLI's resolved
+	// paths are the agent's too - modulo an XDG_* set in a shell rc that the
+	// GUI session never sees, which is exactly why they are printed.
+	printPath(out, "config:", p.Config, "")
+	printPath(out, "creds:", p.State, "")
+	// The log path is the redirect hard-coded in the deploy plist's
+	// ProgramArguments; the plist is installed verbatim, never templated.
+	if home, err := os.UserHomeDir(); err == nil {
+		printPath(out, "logs:", filepath.Join(home, "Library", "Logs", binName+".log"), "")
 	}
 
 	_, _ = fmt.Fprintln(out, verdict(running))

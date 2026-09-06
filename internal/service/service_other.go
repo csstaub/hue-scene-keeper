@@ -17,8 +17,13 @@ func unsupported(action string) error {
 		"on %s, %s whatever supervises `%s run` here", binName, runtime.GOOS, action, binName)
 }
 
-// Status is not implemented on this platform.
-func Status(_ context.Context, _ io.Writer) error { return unsupported("check") }
+// Status is not implemented on this platform, but the resolved paths are
+// platform-independent and still worth saying before explaining the gap.
+func Status(_ context.Context, out io.Writer, p Paths) error {
+	printPath(out, "config:", p.Config, "")
+	printPath(out, "creds:", p.State, "")
+	return unsupported("check")
+}
 
 // Start is not implemented on this platform.
 func Start(_ context.Context, _ io.Writer) error { return unsupported("start") }

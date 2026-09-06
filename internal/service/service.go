@@ -10,8 +10,10 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"strings"
@@ -62,6 +64,74 @@ func verdict(running bool) string {
 		return "\nA background daemon is recalling scenes right now.\nStop it with `" + binName + " stop` before running with --dry-run."
 	}
 	return "\nNothing is recalling scenes in the background."
+}
+
+// Paths carries the config and credentials paths the CLI resolved from its
+// flags and XDG environment. Status prints them as candidates rather than
+// facts: the service manager runs the daemon with its own environment, which
+// on Linux resolves different paths entirely, so the reader is being handed a
+// list of possibilities, not a promise.
+type Paths struct {
+	Config string
+	State  string
+}
+
+// printPath prints one aligned path line. The label column is the same
+// hand-aligned 11 characters as the rest of status's output; a continuation
+// line under the previous label passes label "".
+//
+// A path whose file is missing is annotated, but only on a definite
+// ErrNotExist: a permission error (a root-owned state directory read as a
+// user) proves nothing about the file and gets no annotation.
+func printPath(w io.Writer, label, path, note string) {
+	var notes []string
+	if note != "" {
+		notes = append(notes, note)
+	}
+	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
+		notes = append(notes, "not present")
+	}
+	suffix := ""
+	if len(notes) > 0 {
+		suffix = " (" + strings.Join(notes, ", ") + ")"
+	}
+	_, _ = fmt.Fprintf(w, "%-11s%s%s\n", label, path, suffix)
+}
+
+// parseExecStart pulls the unit's own --config and --state values out of
+// `systemctl show -p ExecStart --value` output, which looks like
+//
+//	{ path=/usr/local/bin/hue-scene-keeper ; argv[]=/usr/local/bin/hue-scene-keeper --config /etc/... --state /var/... run ; ignore_errors=no ; ... }
+//
+// The argv segment is tokenized on spaces, so a path containing one is lost -
+// the shipped unit's paths never do, and a failed parse returns empty strings,
+// which the caller reads as "no extra candidates" rather than an error.
+func parseExecStart(show string) (config, state string) {
+	_, argv, ok := strings.Cut(show, "argv[]=")
+	if !ok {
+		return "", ""
+	}
+	if end := strings.Index(argv, " ; "); end >= 0 {
+		argv = argv[:end]
+	}
+	fields := strings.Fields(argv)
+	for i, f := range fields {
+		next := ""
+		if i+1 < len(fields) {
+			next = fields[i+1]
+		}
+		switch {
+		case f == "--config":
+			config = next
+		case f == "--state":
+			state = next
+		case strings.HasPrefix(f, "--config="):
+			config = strings.TrimPrefix(f, "--config=")
+		case strings.HasPrefix(f, "--state="):
+			state = strings.TrimPrefix(f, "--state=")
+		}
+	}
+	return config, state
 }
 
 // probe runs a command for its exit status alone, discarding both streams. It

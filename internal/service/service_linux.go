@@ -100,10 +100,12 @@ func (notRunningError) ExitStatus() int { return 3 }
 //
 // It returns notRunningError when nothing is running, so `status` can be used
 // in a monitoring check without parsing its prose.
-func Status(ctx context.Context, out io.Writer) error {
+func Status(ctx context.Context, out io.Writer, p Paths) error {
 	s, err := detect(ctx)
 	if err != nil {
 		_, _ = fmt.Fprintf(out, "service:   none installed\n           %v\n", err)
+		printPath(out, "config:", p.Config, "")
+		printPath(out, "creds:", p.State, "")
 		_, _ = fmt.Fprintln(out, verdict(false))
 		// No unit at all is still "not running": a check asking whether
 		// anything is about to move the lights wants the same answer.
@@ -132,6 +134,24 @@ func Status(ctx context.Context, out io.Writer) error {
 		_, _ = fmt.Fprintf(out, "at boot:   %s - it will not start on its own until `%s start`\n",
 			orUnknown(enabled), binName)
 	}
+
+	// The unit passes its own --config/--state (the shipped one uses /etc and
+	// /var/lib), which are usually not what this shell resolves. Both are
+	// candidates; the reader knows which process they are asking about.
+	unitConfig, unitState := parseExecStart(s.query(ctx, "show", "--property=ExecStart", "--value", unit))
+	printPath(out, "config:", p.Config, "")
+	if unitConfig != "" && unitConfig != p.Config {
+		printPath(out, "", unitConfig, "systemd unit")
+	}
+	printPath(out, "creds:", p.State, "")
+	if unitState != "" && unitState != p.State {
+		printPath(out, "", unitState, "systemd unit")
+	}
+	journalctl := "journalctl -u " + unit
+	if s.user {
+		journalctl = "journalctl --user -u " + unit
+	}
+	_, _ = fmt.Fprintf(out, "logs:      journald (%s -f)\n", journalctl)
 
 	_, _ = fmt.Fprintln(out, verdict(running))
 	if !running {
