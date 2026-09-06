@@ -46,7 +46,7 @@ func run(ctx context.Context, out io.Writer, argv ...string) error {
 }
 
 // capture runs a command for its standard output, which is how the service
-// managers answer questions: launchctl and systemctl both have machine-shaped
+// managers answer questions: launchctl and systemctl both have machine-readable
 // query subcommands, and reading those beats inferring state from a process
 // listing. Output is returned even when the command fails, because both tools
 // report "not running" through a non-zero exit.

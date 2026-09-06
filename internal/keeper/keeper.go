@@ -58,10 +58,10 @@ const recallQueue = 256
 //
 // The delays are fixed rather than jittered. The client's rate limiter
 // already spaces retries out, so a house-wide wave of them queues rather
-// than collides. The limiter's burst allowance dents that only slightly: the
-// first few retries of a wave can land together, but the burst is capped at
-// limiterBurst and a handful of concurrent requests is nothing to a LAN
-// bridge, so jitter still buys nothing here.
+// than collides. The limiter's burst allowance dents that only slightly.
+// The first few retries of a wave can land together, but the burst is capped
+// at limiterBurst, and a handful of concurrent requests is nothing to a LAN
+// bridge. Jitter still buys nothing here.
 var recallBackoff = []time.Duration{time.Second, 3 * time.Second}
 
 // drainGrace bounds the shutdown drain: how long dispatch may go on
@@ -99,7 +99,7 @@ type trigger struct {
 	reason string
 
 	// at is when the event behind this trigger was seen, carried through so
-	// the recall it leads to can report an honest end-to-end time. emit stamps
+	// the recall it leads to can report the true end-to-end time. emit stamps
 	// it for a creator that has not; a power-restore lookup pre-stamps the
 	// light trigger it emits with the device trigger's time, so the lookup's
 	// own round trips are counted rather than hidden.
@@ -179,8 +179,8 @@ type pendingRecall struct {
 	// handed it to the sender, sentAt when the sender picked it up. sentAt is
 	// written by the sender, which owns the entry at that moment, so the
 	// single-owner rule in the comment above still holds. A retry overwrites
-	// committedAt and sentAt but keeps triggeredAt, so its total honestly
-	// includes the backoff it waited out.
+	// committedAt and sentAt but keeps triggeredAt, so its total includes
+	// the backoff it waited out.
 	triggeredAt time.Time
 	committedAt time.Time
 	sentAt      time.Time
@@ -200,7 +200,7 @@ type groupSuppression struct {
 // A power_restored lookup never writes what it read back into the registry,
 // on purpose. So the registry has no record of the lamp returning and would
 // veto every restore. Both sources count: the reason this entry was created
-// for, and any power_restored trigger that folded into it afterwards.
+// for, and any power_restored trigger that folded into it afterward.
 func (p *pendingRecall) skipsOnCheck() bool {
 	return p.foldedPowerRestore || p.reason == reasonPowerRestored
 }
@@ -295,9 +295,9 @@ func New(client *hue.Client, reg *registry.Registry, cfg *config.Config, log *sl
 // hue.ErrStreamUnreachable instead of retrying forever.
 //
 // With the stream's linear backoff that is a little over two minutes of
-// trying, comfortably longer than a bridge reboot, and short enough that a
-// bridge which moved to a new DHCP lease is rediscovered rather than waited on
-// for the rest of the daemon's life.
+// trying. Comfortably longer than a bridge reboot, and short enough that a
+// bridge on a new DHCP lease is rediscovered rather than waited on for the
+// rest of the daemon's life.
 const streamGiveUp = 12
 
 // Run syncs the registry, then consumes the event stream until ctx is
@@ -310,10 +310,10 @@ const streamGiveUp = 12
 func (k *Keeper) Run(ctx context.Context) error {
 	// The goroutines stop when Run is finished with them, not only when the
 	// caller's context ends. Stream also returns on its own - a revoked
-	// application key, a pin mismatch, MaxConsecutiveFailures - and goroutines
-	// watching only the caller's context would then never return, leaving Run
-	// waiting forever on them: a process alive, quiet, and recalling nothing,
-	// which is the outcome Stream's giving up exists to avoid.
+	// application key, a pin mismatch, MaxConsecutiveFailures. Goroutines
+	// watching only the caller's context would then never return, and Run
+	// would wait on them forever: a process alive, quiet, and recalling
+	// nothing, which is the outcome Stream's giving up exists to avoid.
 	workCtx, stopWork := context.WithCancel(ctx)
 	defer stopWork()
 
@@ -366,7 +366,7 @@ func (k *Keeper) Run(ctx context.Context) error {
 // logger, naming which one it was, and then lets it carry on unwinding.
 //
 // It deliberately does not absorb the panic. Every one of these goroutines is
-// load-bearing: dispatch is where recalls are decided at all, and a lookup
+// essential: dispatch is where recalls are decided at all, and a lookup
 // worker that dies mid-item leaves its group marked busy forever, so its room
 // never gets another power-restore lookup. Swallowing the panic would leave the
 // daemon running, logging nothing further, and quietly doing none of that -
@@ -515,11 +515,11 @@ func (k *Keeper) enqueueStartupTriggers() {
 			}
 			// Spend the group's one trigger only on a light this group
 			// actually governs. A zone iterated here mostly holds lights
-			// whose rooms own them; a trigger emitted for one of those would
+			// whose rooms own them. A trigger emitted for one of those would
 			// resolve to the room and leave the zone without its startup
-			// recall - which matters now that an excluded room cedes lights
-			// to a zone, because the zone's iteration is the only one that
-			// will ever see those lights.
+			// recall. That matters now that an excluded room cedes lights to
+			// a zone, because the zone's iteration is the only one that will
+			// ever see those lights.
 			if g, ok := k.reg.GroupForLight(lightID, excl.GroupExcluded); !ok || g.ID != group.ID {
 				continue
 			}
@@ -634,10 +634,10 @@ func (k *Keeper) emit(t trigger) {
 // queue to real triggers.
 //
 // Activity is much the more numerous of the two - every brightness step of
-// every light produces one - and much the less important: losing a trigger
-// loses a recall, while losing an activity only lets a recall land sooner
-// than it might have. So it competes for the queue only while there is room
-// to spare.
+// every light produces one - and much the less important. Losing a trigger
+// loses a recall. Losing an activity only lets a recall land sooner than it
+// might have. So it competes for the queue only while there is room to
+// spare.
 func (k *Keeper) emitActivity(lightID string) {
 	if len(k.triggers) >= cap(k.triggers)/2 {
 		return
@@ -649,8 +649,8 @@ func (k *Keeper) emitActivity(lightID string) {
 		// An excluded light gets no say in its room's timing, the same as it
 		// gets no say in whether the room is recalled at all. People exclude a
 		// light precisely because it will not sit still - a dynamic scene, a
-		// lamp on a failing radio - and a chatterer that kept extending the
-		// wait held its room at coalesce_max indefinitely, so the one setting
+		// lamp on a failing radio. A chatterer that kept extending the wait
+		// held its room at coalesce_max indefinitely, so the one setting
 		// offered to silence it left it setting the pace instead.
 		//
 		// The room is still styled around it: a recall caused by any other
@@ -769,9 +769,9 @@ func (k *Keeper) dispatch(ctx context.Context) {
 func (k *Keeper) schedule(pending map[string]*pendingRecall, t trigger) bool {
 	if t.kind == kindActivity {
 		// Activity extends a wait, never starts one. That asymmetry is what
-		// keeps a recall's own echo out of here: by the time the bridge
+		// keeps a recall's own echo out of here. By the time the bridge
 		// reports the lights it just turned on, the entry that caused them is
-		// long gone from pending, so there is nothing for the echo to extend
+		// long gone from pending. There is nothing for the echo to extend,
 		// and it cannot conjure a new entry either.
 		group, ok := k.groupForLight(t.id)
 		if !ok {
@@ -793,9 +793,9 @@ func (k *Keeper) schedule(pending map[string]*pendingRecall, t trigger) bool {
 		// The exemption from commit's "is anything still on" veto has to carry
 		// across the fold, though. A power_restored lookup deliberately never
 		// writes what it read back into the registry, so the registry has no
-		// record of the lamp returning; folding that trigger into an entry
+		// record of the lamp returning. Folding that trigger into an entry
 		// created by an ordinary switch-on would leave the older reason in
-		// place and the restore would be vetoed and dropped, with no retry.
+		// place, and the restore would be vetoed and dropped with no retry.
 		if r.reason == reasonPowerRestored {
 			p.foldedPowerRestore = true
 		}
@@ -827,9 +827,9 @@ func (k *Keeper) schedule(pending map[string]*pendingRecall, t trigger) bool {
 // A single switch flip sees no further activity and is acted on one gap later,
 // exactly as before. A home automation writing to the whole house keeps
 // resetting the gap, so the recall lands after it has finished rather than in
-// the middle of it - which matters because the commands that would land on top
-// of our scene arrive at lights that are already on, and so carry no off->on
-// edge to trigger a second recall afterwards.
+// the middle of it. That matters because the commands that would land on top
+// of our scene arrive at lights that are already on. They carry no off->on
+// edge to trigger a second recall afterward.
 //
 // hardAt is the escape hatch. A light that chatters - a dynamic scene, a lamp
 // with a failing radio - would otherwise defer its group's recall forever.
@@ -868,7 +868,7 @@ func (k *Keeper) drain(pending map[string]*pendingRecall) {
 			// permanent no-op for this entry: it would then fire one window
 			// after the recall ahead of it lands, ignoring activity still
 			// arriving. That is the half-styled room coalesce_window exists to
-			// prevent, and it is not a rare shape - a burst turning lights on
+			// prevent, and it is not a rare case. A burst turning lights on
 			// is what puts a recall on the wire in the first place, so "recall
 			// in flight while the burst continues" is the ordinary case. The
 			// overrun this costs is bounded by one round trip per deferral,
@@ -892,7 +892,7 @@ func (k *Keeper) drain(pending map[string]*pendingRecall) {
 //
 // A recall lost here is not recovered by restarting. The light that caused it
 // is already on, so the resync on the next start sees it as it has always been
-// and no off->on edge ever occurs; onConnect's first-connect branch does no
+// and no off->on edge ever occurs. onConnect's first-connect branch does no
 // diffing, and cannot, because it has no earlier state to diff against. The
 // room simply stays as whatever put it there until someone flips a switch. A
 // `systemctl restart`, or a package upgrade, landing in the seconds after
@@ -954,7 +954,7 @@ func (k *Keeper) shutdown(pending map[string]*pendingRecall) {
 // schedNow is the clock the debounce and the retry backoff run on.
 //
 // It is deliberately real time rather than the k.now test hook. Every deadline
-// it produces is waited out by a real time.Timer, so the two have to agree: a
+// it produces is waited out by a real time.Timer, so the two have to agree. A
 // test that freezes k.now to step over the ten-second recall floor without
 // sleeping would otherwise strand every pending entry behind a deadline the
 // timer reaches but the comparison never does.
@@ -1061,9 +1061,9 @@ func (k *Keeper) runLookup(ctx context.Context, item deviceLookup) {
 		// Stop at the first sign of shutdown rather than walking the rest of
 		// the group. The remaining reads cost little by then - the client's
 		// rate limiter refuses a request on a dead context before it reserves
-		// a slot or opens a connection - but a worker has no business still
-		// working through a list on behalf of a dispatch goroutine that has
-		// gone, and this is the only place that says so.
+		// a slot or opens a connection. But a worker has no business still
+		// working through a list for a dispatch goroutine that has gone, and
+		// this is the only place that says so.
 		if ctx.Err() != nil {
 			return
 		}
@@ -1090,9 +1090,9 @@ func (k *Keeper) coalesceWindow() time.Duration {
 }
 
 // groupForLight resolves the group governing a light under the current
-// exclusions. Exclusion feeds the resolution rather than vetoing its result:
-// an excluded room cedes its lights to a non-excluded zone that holds them,
-// and a light whose room and zones are all excluded belongs to nothing - so a
+// exclusions. Exclusion feeds the resolution rather than vetoing its result.
+// An excluded room cedes its lights to a non-excluded zone that holds them,
+// and a light whose room and zones are all excluded belongs to nothing. So a
 // group this returns is never an excluded one, and no caller needs to check.
 func (k *Keeper) groupForLight(lightID string) (hue.Group, bool) {
 	k.mu.RLock()
@@ -1208,9 +1208,9 @@ func (k *Keeper) commit(p *pendingRecall) bool {
 	// A light switched on and straight back off inside the coalescing window
 	// should not light the whole room.
 	//
-	// Only power_restored is exempt, and for one specific reason: its lookup
+	// Only power_restored is exempt, and for one specific reason. Its lookup
 	// reads the lamp from the bridge and deliberately never writes what it
-	// finds back into the registry, so the registry has no record of the lamp
+	// finds back into the registry. So the registry has no record of the lamp
 	// returning and would veto every restore. Switch-on, startup and reconnect
 	// all take their triggers from the registry in the first place, so asking
 	// it again here is both meaningful and current.
@@ -1252,10 +1252,10 @@ func (k *Keeper) commit(p *pendingRecall) bool {
 // which prefers a light's non-excluded room over any zone it is in. For a room
 // recall that lands on the room itself and the set is a singleton, and so it is
 // for a zone that only carves lights out of excluded rooms. For a mixed zone it
-// is not: the zone wins only for a light in no live room at all, so a zone
-// blending such lights with room-owning ones sends its echo into those rooms -
-// where, with no window of their own, every one of them scheduled a recall of
-// its own off the back of ours. Using the same resolution here is what keeps
+// is not. The zone wins only for a light in no live room at all, so a zone
+// blending such lights with room-owning ones sends its echo into those rooms.
+// With no window of their own, every one of them scheduled a recall of its
+// own off the back of ours. Using the same resolution here is what keeps
 // "armed on every group the echo can be attributed to" true by construction:
 // an excluded group is never armed because no echo can resolve to it.
 //
@@ -1470,8 +1470,8 @@ func (k *Keeper) Explain(query string) string {
 	fmt.Fprintf(&b, "scene:  %s (%s, currently %s)\n", scene.Name(), scene.ID, orUnknown(scene.State))
 
 	if onKnown && on {
-		// Being honest here matters: a switched-on light is the single most
-		// likely thing a puzzled user will ask about.
+		// Getting this answer right matters: a switched-on light is the
+		// single most likely thing a puzzled user will ask about.
 		b.WriteString("result: NOTHING right now - this light is already on, and only an\n")
 		b.WriteString("        off-to-on transition triggers a recall. Switch it off and on\n")
 		b.WriteString("        again to trigger one. A mains cut only triggers a recall if\n")

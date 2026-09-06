@@ -67,7 +67,7 @@ func TestProbeReportsExitStatus(t *testing.T) {
 	}
 }
 
-// TestParseExecStart feeds the parser the shape `systemctl show -p ExecStart
+// TestParseExecStart feeds the parser what `systemctl show -p ExecStart
 // --value` actually prints for the shipped unit, captured rather than
 // imagined, the same way TestLaunchdField pins launchctl's output.
 func TestParseExecStart(t *testing.T) {

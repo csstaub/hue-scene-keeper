@@ -21,8 +21,9 @@ const unit = binName + ".service"
 // both, so that start and stop mean the same thing on Linux as they do on
 // macOS - the daemon is running, or it is not, across reboots either way.
 
-// scope is the systemctl invocation to use, including --user and any sudo.
-type scope struct {
+// invocation is how to run systemctl: the base argv, including --user and
+// any sudo.
+type invocation struct {
 	base []string
 	user bool
 }
@@ -30,9 +31,9 @@ type scope struct {
 // detect asks systemctl which unit it knows rather than stat-ing the several
 // directories a unit can be installed into. The system unit is the one the
 // repo ships, so it wins; a user unit is a reasonable hand install.
-func detect(ctx context.Context) (scope, error) {
+func detect(ctx context.Context) (invocation, error) {
 	if _, err := exec.LookPath("systemctl"); err != nil {
-		return scope{}, errors.New("systemctl not found; this machine does not run systemd, " +
+		return invocation{}, errors.New("systemctl not found; this machine does not run systemd, " +
 			"so start and stop have nothing to drive - run `" + binName + " run` under whatever supervises services here")
 	}
 	if probe(ctx, "systemctl", "cat", unit) {
@@ -44,16 +45,16 @@ func detect(ctx context.Context) (scope, error) {
 				base = append([]string{sudo}, base...)
 			}
 		}
-		return scope{base: base}, nil
+		return invocation{base: base}, nil
 	}
 	if probe(ctx, "systemctl", "--user", "cat", unit) {
-		return scope{base: []string{"systemctl", "--user"}, user: true}, nil
+		return invocation{base: []string{"systemctl", "--user"}, user: true}, nil
 	}
-	return scope{}, fmt.Errorf("systemd knows no unit named %s; install deploy/%s "+
+	return invocation{}, fmt.Errorf("systemd knows no unit named %s; install deploy/%s "+
 		"into /etc/systemd/system and run `systemctl daemon-reload` (see the README)", unit, unit)
 }
 
-func (s scope) where() string {
+func (s invocation) where() string {
 	if s.user {
 		return "user"
 	}
@@ -75,9 +76,9 @@ func Start(ctx context.Context, out io.Writer) error {
 
 // Restart restarts the unit, or starts it if it was stopped, and makes sure it
 // comes back at boot either way. The enable is what keeps restart's outcome
-// identical to start's: `systemctl restart` alone would happily bounce a
+// identical to start's. `systemctl restart` alone would happily bounce a
 // disabled unit into a state where it runs now and silently stays down after
-// the next reboot - neither of the two states start and stop promise.
+// the next reboot. That is neither of the two states start and stop promise.
 func Restart(ctx context.Context, out io.Writer) error {
 	s, err := detect(ctx)
 	if err != nil {
@@ -186,7 +187,7 @@ func Status(ctx context.Context, out io.Writer, p Paths) error {
 //
 // It drops any sudo prefix. These queries need no privileges, and prompting
 // for a password to answer a question would be a poor trade.
-func (s scope) query(ctx context.Context, args ...string) string {
+func (s invocation) query(ctx context.Context, args ...string) string {
 	base := s.base
 	if len(base) > 0 && filepath.Base(base[0]) == "sudo" {
 		base = base[1:]

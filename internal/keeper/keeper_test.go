@@ -119,7 +119,7 @@ func settle() { time.Sleep(600 * time.Millisecond) }
 // it sends the recall the way the sender goroutine would.
 //
 // Recalls are dispatched asynchronously now. A test that wants to assert on
-// what reached the bridge immediately afterwards has to close that loop
+// what reached the bridge immediately after has to close that loop
 // itself. Reports whether the recall was admitted.
 func commitRecall(t *testing.T, ctx context.Context, k *Keeper, r recall) bool {
 	t.Helper()
@@ -148,7 +148,7 @@ func TestRecallsRoomWhenLightSwitchesOn(t *testing.T) {
 // TestDoesNotLoopWhenRecallTurnsOnWholeRoom is the most important test here.
 //
 // Recalling a room turns on every light in it. The bridge reports each of
-// those lights as newly on. Without room-scoped suppression, every one of
+// those lights as newly on. Without per-room suppression, every one of
 // those echoes is a fresh off->on trigger, and the daemon recalls forever.
 func TestDoesNotLoopWhenRecallTurnsOnWholeRoom(t *testing.T) {
 	b, lights := kitchenBridge(t)
@@ -320,10 +320,10 @@ func TestStartupSpendsAZoneTriggerOnALightItGoverns(t *testing.T) {
 }
 
 // TestACarveOutZoneRecallDoesNotFanOutIntoLiveRooms: a zone blending a ceded
-// light with a live room's lights sends its echo into that room, and the
+// light with a live room's lights sends its echo into that room. The
 // suppression armed at commit has to be attributed with the same
-// exclusion-aware resolution that attributed the trigger - or the kitchen
-// schedules a recall off the back of ours.
+// exclusion-aware resolution that attributed the trigger. Otherwise the
+// kitchen schedules a recall off the back of ours.
 func TestACarveOutZoneRecallDoesNotFanOutIntoLiveRooms(t *testing.T) {
 	b := fake.NewBridge(t)
 	kitchen := b.AddRoom("room-kitchen", "Kitchen", "Ceiling K", "Counter K")
@@ -700,9 +700,9 @@ func TestExplainDoesNotClaimAnAlreadyOnLightWouldRecall(t *testing.T) {
 }
 
 // TestWholeHouseRestoreRecallsEveryRoom: a fuse or a breaker spanning several
-// rooms is the whole reason Trigger B exists, and the lookup pool used to be a
-// drop semaphore four deep - so eight rooms rejoining at once produced four
-// recalls and four warnings, with the rest thrown away and never retried.
+// rooms is the whole reason Trigger B exists. The lookup pool used to be a
+// drop semaphore four deep, so eight rooms rejoining at once produced four
+// recalls and four warnings. The rest were thrown away and never retried.
 func TestWholeHouseRestoreRecallsEveryRoom(t *testing.T) {
 	const rooms = 8
 
@@ -792,7 +792,7 @@ func TestASecondRestoreOfTheSameRoomStillWorks(t *testing.T) {
 // TestConnectivityRestoredWhileDisconnectedIsRecalled: Trigger B fires from a
 // stream event, so a mains restore landing while the stream is down used to be
 // lost for good - the next resync recorded `connected` as though it had always
-// been so. Trigger A has recovery for this shape of problem; this is Trigger B's.
+// been so. Trigger A has recovery for this kind of problem; this is Trigger B's.
 func TestConnectivityRestoredWhileDisconnectedIsRecalled(t *testing.T) {
 	b, lights := kitchenBridge(t)
 	b.SetLightStateSilently(lights[0], true)
@@ -868,7 +868,7 @@ func TestExplainDoesNotPromiseAShortMainsCutTriggersARecall(t *testing.T) {
 	}
 	for _, want := range []string{"mark the lamp", "about a minute", "no event at all"} {
 		if !strings.Contains(out, want) {
-			t.Errorf("Explain omitted the mains-cut caveat (%q):\n%s", want, out)
+			t.Errorf("Explain omitted the mains-cut limitation (%q):\n%s", want, out)
 		}
 	}
 }
@@ -960,8 +960,8 @@ func TestActivityCannotDeferPastCoalesceMax(t *testing.T) {
 
 // TestExcludedLightActivityDoesNotDeferTheRoom: an excluded light does not
 // trigger a recall, and does not delay one either. The light people exclude is
-// typically the one that never sits still, so leaving it able to extend the
-// wait held its room at coalesce_max for as long as it chattered - the setting
+// typically the one that never sits still. Leaving it able to extend the wait
+// held its room at coalesce_max for as long as it chattered. The setting
 // offered to silence it left it setting the pace instead.
 func TestExcludedLightActivityDoesNotDeferTheRoom(t *testing.T) {
 	b, lights := kitchenBridge(t)
@@ -1023,7 +1023,7 @@ func TestActivityAloneNeverRecalls(t *testing.T) {
 	}
 }
 
-// TestWholeHouseBurstRecallsEachRoomExactlyOnce is the shape of a GPS arrival
+// TestWholeHouseBurstRecallsEachRoomExactlyOnce models a GPS arrival
 // automation: every room lit at once, from a cold start with everything off.
 func TestWholeHouseBurstRecallsEachRoomExactlyOnce(t *testing.T) {
 	b := fake.NewBridge(t)
@@ -1177,7 +1177,7 @@ func TestASlowRecallDoesNotLoseAnotherRoom(t *testing.T) {
 // power_restored trigger arriving for a group that is already pending is
 // folded into the existing entry, which keeps the reason it was created with.
 // The exemption from commit's "is any light still on" veto has to survive that
-// fold, or the restore is silently vetoed and dropped with no retry - the lamp
+// fold, or the restore is silently vetoed and dropped with no retry. The lamp
 // that came back on mains is never written into the registry, so the veto has
 // nothing to see.
 func TestPowerRestoreKeepsItsExemptionWhenFoldedIntoAPendingRecall(t *testing.T) {
@@ -1221,7 +1221,7 @@ func TestPowerRestoreKeepsItsExemptionWhenFoldedIntoAPendingRecall(t *testing.T)
 //
 // The fake can only create a light by putting it in a room, so the strip starts
 // in one. A caller that needs it genuinely roomless - the way an unassigned lamp
-// looks on a real bridge - deletes that room afterwards.
+// looks on a real bridge - deletes that room afterward.
 func mixedZoneBridge(t *testing.T) (b *fake.Bridge, kitchen, strip []string) {
 	t.Helper()
 	b = fake.NewBridge(t)
@@ -1423,7 +1423,7 @@ func TestAPendingRecallIsSentAtShutdown(t *testing.T) {
 
 // TestARecallOnTheWireIsNotCutOffByShutdown: the request is the sender's, and
 // canceling it with everything else abandoned a recall the bridge had already
-// accepted - the fake stops short of applying one whose caller has gone, just
+// accepted. The fake stops short of applying one whose caller has gone, just
 // as a real bridge may or may not have started on it.
 func TestARecallOnTheWireIsNotCutOffByShutdown(t *testing.T) {
 	b, lights := kitchenBridge(t)
@@ -1489,7 +1489,7 @@ func TestRunReturnsWhenTheStreamGivesUp(t *testing.T) {
 // resyncedKeeper builds a keeper and syncs it against the bridge without
 // starting Run, for tests that drive dispatch's own functions - commit, drain,
 // finish - by hand. Nothing else is running, so the state those functions own
-// can be read straight afterwards, and the clock hook can be set at will.
+// can be read straight afterward, and the clock hook can be set at will.
 func resyncedKeeper(t *testing.T, b *fake.Bridge, cfg *config.Config) (*Keeper, context.Context) {
 	t.Helper()
 	if cfg == nil {
@@ -1617,10 +1617,10 @@ func TestAFailedZoneRecallLeavesANewerWindowAlone(t *testing.T) {
 // The entry is not committed - two entries fighting over one group's
 // suppression state is exactly what inFlight exists to prevent - and it is not
 // left with a deadline in the past either, so it gets a fresh window. Carrying
-// hardAt forward with it is deliberate: a burst turning lights on is what put
+// hardAt forward with it is deliberate. A burst turning lights on is what put
 // the recall on the wire in the first place, so activity is usually still
-// arriving, and an entry whose cap sits behind its deadline can never be
-// deferred by it again. The cost is bounded by one round trip per deferral.
+// arriving. An entry whose cap sits behind its deadline can never be deferred
+// by it again. The cost is bounded by one round trip per deferral.
 func TestADeferredRecallGetsAFreshWindowAndCarriesItsCap(t *testing.T) {
 	b, _ := kitchenBridge(t)
 	cfg := testConfig()
@@ -1691,9 +1691,9 @@ func TestADeferredRecallGetsAFreshWindowAndCarriesItsCap(t *testing.T) {
 // TestAFailedRecallYieldsItsSlotToANewerTrigger: a refused recall is retried by
 // putting it back into pending, but only if nothing has taken the group's slot
 // meanwhile. The newer entry carries a fresher reason and trigger - and, for a
-// power restore, an exemption the older one does not have - so displacing it
-// with a stale retry would recall the room for the wrong reason and lose the
-// veto the newer entry was created to skip.
+// power restore, an exemption the older one does not have. Displacing it with
+// a stale retry would recall the room for the wrong reason and lose the veto
+// the newer entry was created to skip.
 func TestAFailedRecallYieldsItsSlotToANewerTrigger(t *testing.T) {
 	b, lights := kitchenBridge(t)
 	b.SetLightStateSilently(lights[0], true)

@@ -334,9 +334,9 @@ func TestGroupShadowedNeedsEveryLightCovered(t *testing.T) {
 
 // TestDeletedLightResolvesToNoGroup: a zone still lists a deleted light among
 // its children until the zone itself updates, so the zone fallback would keep
-// resolving a light the cache no longer holds - and that makes GroupShadowed
-// read the zone as reachable, swallowing the "exclusion has no effect" warning
-// the config layer prints.
+// resolving a light the cache no longer holds. That makes GroupShadowed read
+// the zone as reachable, swallowing the "exclusion has no effect" warning the
+// config layer prints.
 func TestDeletedLightResolvesToNoGroup(t *testing.T) {
 	r := seed(t)
 	apply(r, "add", raw(t, hue.Group{
@@ -373,7 +373,7 @@ func syncClient(t *testing.T, byType map[string][]string) *hue.Client {
 	})
 }
 
-// TestSyncSkipsAnUnusableResource: one resource whose shape we cannot read used
+// TestSyncSkipsAnUnusableResource: one resource we cannot decode used
 // to fail the whole sync, which fails the resync, which drops the stream - and
 // the same resource comes back on every reconnect, so the daemon parks at the
 // backoff cap doing nothing at all.
@@ -381,7 +381,7 @@ func TestSyncSkipsAnUnusableResource(t *testing.T) {
 	c := syncClient(t, map[string][]string{
 		hue.TypeLight: {
 			// owner as a string rather than a resource identifier, which is
-			// the shape change this guards against.
+			// the schema change this guards against.
 			`{"id":"bad","type":"light","owner":"dev1"}`,
 			`{"id":"light1","type":"light","owner":{"rid":"dev1","rtype":"device"},"on":{"on":true}}`,
 		},

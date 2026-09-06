@@ -406,7 +406,7 @@ func waitUntil(t *testing.T, timeout time.Duration, cond func() bool, what strin
 // request is sent, not after Do returns. The client has no Timeout, since that
 // would cap the stream, and the transport sets no ResponseHeaderTimeout. So a
 // bridge that accepts the connection and then never writes a status line is
-// bounded by nothing else. Arming afterwards left the daemon deaf forever with
+// bounded by nothing else. Arming afterward left the daemon deaf forever with
 // no log line and no reconnect.
 func TestStreamWatchdogArmedBeforeRequest(t *testing.T) {
 	// Deliberately not streamServer. This handler never writes headers at all.

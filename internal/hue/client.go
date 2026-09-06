@@ -242,7 +242,7 @@ func matchPin(have, got string) error {
 //
 // Small on purpose. The limiter is the backstop under the 10s recall floor,
 // and its worst case per second is burst + rate: 7 at the defaults, still
-// under the ~10/s the bridge is documented to take. Three covers the shape
+// under the ~10/s the bridge is documented to take. Three covers the case
 // that actually hurts - a power-restore lookup GET followed a coalesce window
 // later by the recall PUT it triggered, with one token spare for a second
 // room's lookup landing in the same moment. Anything larger buys nothing that
@@ -529,10 +529,10 @@ func (c *Client) do(ctx context.Context, method, path string, body any) ([]byte,
 // reqTrace collects the transport's timing callbacks for one request.
 //
 // Plain fields with no lock, deliberately. Every callback the transport fires
-// for a request happens before Do hands back the response or the error - the
+// for a request happens before Do hands back the response or the error: the
 // dial and handshake on the way in, GotFirstResponseByte from the read loop
-// before it delivers the response - and nothing here is read until after that,
-// so the delivery is the synchronization.
+// before it delivers the response. Nothing here is read until after that, so
+// the delivery is the synchronization.
 type reqTrace struct {
 	reused       bool
 	connectStart time.Time
@@ -563,11 +563,11 @@ func (t *reqTrace) hooks() *httptrace.ClientTrace {
 
 // logRequest reports where one request's time went, at debug level.
 //
-// This is the ground truth for "why was that recall slow": wait is the rate
-// limiter's queue, connect and tls say the connection pool was cold (a resumed
-// handshake shows as a short tls, a full one as a long one), and bridge is the
-// span from the request going out to the first response byte - the bridge's
-// own think time. A reused connection reports neither connect nor tls.
+// This is the answer to "why was that recall slow". wait is the rate
+// limiter's queue. connect and tls say the connection pool was cold (a
+// resumed handshake shows as a short tls, a full one as a long one). bridge
+// is the span from the request going out to the first response byte - the
+// bridge's own think time. A reused connection reports neither connect nor tls.
 func (c *Client) logRequest(ctx context.Context, method, path string, wait time.Duration,
 	start time.Time, tr *reqTrace, status int, err error) {
 	if !c.log.Enabled(ctx, slog.LevelDebug) {

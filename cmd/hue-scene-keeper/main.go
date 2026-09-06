@@ -291,9 +291,9 @@ const defaultLogMaxMB = 8
 //
 // Without --log-file that is stderr, which is what a terminal wants, what
 // systemd hands to journald, and what the launchd plist redirects. With it,
-// the daemon owns the file itself and keeps it under a cap - the only way to
-// bound a file on macOS, where the log lives under a per-user $HOME that a
-// root-owned newsyslog rule cannot name and no pid file exists for it to
+// the daemon owns the file itself and keeps it under a cap. That is the only
+// way to bound a file on macOS: the log lives under a per-user $HOME that a
+// root-owned newsyslog rule cannot name, and there is no pid file for it to
 // signal a reopen through.
 func logOutput(g globals) (io.Writer, func(), error) {
 	// Checked even without --log-file, because it is unambiguously a typo
@@ -330,7 +330,7 @@ func newLogger(w io.Writer, format, level string) (*slog.Logger, *slog.LevelVar,
 	}
 	// A LevelVar rather than the level itself, so loadAll can hand the config
 	// file's log.level to a handler that already exists. The returned var is
-	// the only way to move it afterwards: the handler holds it as a Leveler
+	// the only way to move it afterward: the handler holds it as a Leveler
 	// and nothing else can reach it.
 	levelVar := new(slog.LevelVar)
 	levelVar.Set(lvl)
@@ -423,11 +423,10 @@ func describeBridges(bridges []hue.BridgeInfo) string {
 //
 // It writes the file, because that is the whole of the contract: the Pin
 // refuses to trust a certificate it could not persist, so a callback that only
-// sets a field in memory satisfies the signature and not the promise. Where it
-// was written that way - in `auth`, which saves once at the end - a pairing
-// that never finished left this process trusting a key nothing had recorded,
-// and the next run walked back into the trust-on-first-use window with nothing
-// said. The Pin holds no lock while this runs, so the fsync is its own affair.
+// sets a field in memory satisfies the signature and not the promise. `auth`
+// used to be written that way, saving once at the end. A pairing that never
+// finished left that process trusting a key nothing had recorded, and the
+// next run walked back into the trust-on-first-use window with nothing said. The Pin holds no lock while this runs, so the fsync is its own affair.
 func persistPin(creds *config.Credentials, addr string) func(string) error {
 	return func(value string) error {
 		creds.CertPin = value
@@ -530,9 +529,9 @@ func cmdAuth(ctx context.Context, g globals, log *slog.Logger) error {
 	pin := hue.NewPin(creds.CertPin)
 	// Written to disk as it is learned, not kept until the pairing succeeds.
 	// The handshake that learns it happens on the first attempt, minutes before
-	// the user gets round to the link button, and everything after that -
-	// giving up, Ctrl-C, closing the laptop - left this process having trusted
-	// a certificate the next one knew nothing about. Save with no application
+	// the user gets around to the link button. Everything after that - giving
+	// up, Ctrl-C, closing the laptop - used to leave this process trusting a
+	// certificate the next one knew nothing about. Save with no application
 	// key is safe here: it refuses to overwrite an existing key with a blank
 	// one, and this is a file that either has no key yet or keeps the one it
 	// has.
@@ -708,9 +707,9 @@ func cmdList(ctx context.Context, g globals, log *slog.Logger) error {
 		fmt.Printf("warning: %s matched nothing on this bridge\n", entry)
 	}
 	// The other two diagnostic classes. `list` is where a user looks to find
-	// out why their config is not doing what they meant, so an exclusion that
-	// matched but can never bite, or an override key that names nothing, has to
-	// show up here too rather than only in the daemon's log.
+	// out why their config is not doing what they meant. So an exclusion that
+	// matched but can never bite, or an override key that names nothing, has
+	// to show up here too, not only in the daemon's log.
 	for _, entry := range excl.Ineffective {
 		fmt.Printf("warning: %s\n", entry)
 	}
@@ -770,11 +769,11 @@ func cmdRun(ctx context.Context, g globals, log *slog.Logger) error {
 		log.Warn("no pinned bridge certificate yet; the first connection will trust whatever answers")
 	}
 	// config and state are logged because the two paths are the most common
-	// thing to get wrong: `auth` run in an interactive shell picks up
-	// XDG_STATE_HOME from the user's rc file, while the service manager runs
-	// with a bare environment and reads somewhere else. Without these the
-	// symptom is an unpaired daemon looping forever with nothing to show that
-	// the two halves are looking at different files.
+	// thing to get wrong. `auth` run in an interactive shell picks up
+	// XDG_STATE_HOME from the user's rc file; the service manager runs with a
+	// bare environment and reads somewhere else. Without these the symptom is
+	// an unpaired daemon looping forever, with nothing to show that the two
+	// halves are looking at different files.
 	log.Info("starting",
 		"version", version,
 		"bridge", addr,

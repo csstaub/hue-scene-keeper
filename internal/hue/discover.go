@@ -368,7 +368,7 @@ func readName(msg []byte, off int) (string, int, error) {
 			if next < 0 {
 				next = cur + 2
 			}
-			// Pointers must go backwards. Insisting on that, and on a hop
+			// Pointers must go backward. Insisting on that, and on a hop
 			// budget, keeps a hostile datagram from looping the decoder.
 			hops++
 			if ptr >= cur || hops > 16 {

@@ -199,7 +199,7 @@ func unitConfigPath() (string, error) {
 
 // stampedExample returns the example config with two lines of provenance on
 // top: which version wrote it and when. The file is the operator's from then
-// on, and nothing this project ships ever reads the stamp back - it is there
+// on, and nothing this project ships ever reads the stamp back. It is there
 // for the person who opens the file in two years and wants to know where it
 // came from and how old its comments are.
 func stampedExample(version string, at time.Time) ([]byte, error) {
@@ -216,7 +216,7 @@ func stampedExample(version string, at time.Time) ([]byte, error) {
 // --- go: the Go toolchain --------------------------------------------------
 
 // Build compiles the binary for this machine. CGO_ENABLED=0 is not an
-// optimization: it is what makes this binary the same shape as the ones
+// optimization: it is what keeps this binary built the same way as the ones
 // buildTo cross-compiles. A cgo build resolves hostnames through glibc's
 // getaddrinfo, which opens an AF_NETLINK socket that the systemd unit's
 // RestrictAddressFamilies does not allow, so cloud discovery would fail under
@@ -245,11 +245,11 @@ func (Go) Lint() error {
 }
 
 // Install builds the binary and installs it into /usr/local/bin. The compile
-// stays unprivileged and only the copy is elevated, so this target is run as
-// yourself: under `sudo go tool mage go:install` the dependency on Go.Build
+// stays unprivileged and only the copy is elevated, so run this target as
+// yourself. Under `sudo go tool mage go:install` the dependency on Go.Build
 // re-runs the compiler as root, and with -E preserving HOME that leaves
-// root-owned entries in your build and module caches which every later
-// non-root build then fails on.
+// root-owned entries in your build and module caches. Every later non-root
+// build then fails on them.
 func (Go) Install() error {
 	mg.Deps(Go.Build)
 	dir := "/usr/local/bin"
@@ -430,10 +430,10 @@ func (Pkg) Uninstall() error {
 	// Best effort: the agent may not be loaded, which is not a failure.
 	_ = sh.Run("launchctl", "bootout", target)
 	// `hue-scene-keeper stop` writes the label into launchd's per-user disabled
-	// database, and that database outlives the plist: booting out and deleting
-	// the file leaves the entry behind, so a later install by hand fails its
-	// bootstrap with "Bootstrap failed: 5: Input/output error" and nothing on
-	// disk explains why. Uninstalling has to take the label with it.
+	// database, and that database outlives the plist. Booting out and deleting
+	// the file leaves the entry behind. A later install by hand then fails its
+	// bootstrap with "Bootstrap failed: 5: Input/output error", with nothing
+	// on disk to explain why. Uninstalling has to take the label with it.
 	_ = sh.Run("launchctl", "enable", target)
 
 	return sh.RunV("sudo", "/bin/sh", "-c", strings.Join([]string{

@@ -28,7 +28,7 @@ import (
 //
 // Signals are the whole subject here - what a SIGTERM finishes before it exits,
 // and what a second one cuts short - and neither can be observed from inside
-// the process being signalled. Re-executing the test binary is the standard way
+// the process being signaled. Re-executing the test binary is the standard way
 // to get a real process, with a real signal disposition, to send them to. The
 // arguments ride on argv rather than in the environment, so the daemon parses
 // exactly what a shell would have handed it; no test flag is ever parsed,
@@ -191,11 +191,11 @@ func kitchenBridge(t *testing.T) (*fake.Bridge, []string) {
 	return b, lights
 }
 
-// TestSIGTERMSendsTheRecallItWasHolding: the end-to-end shape of the drain. A
+// TestSIGTERMSendsTheRecallItWasHolding: the drain, end to end. A
 // light comes on, the recall sits out its coalescing window, and the service
 // manager stops the daemon in the middle of it - a `systemctl restart` or a
 // package upgrade seconds after somebody walked into the room. Nothing recovers
-// that recall afterwards: the light is already on, so the next start sees no
+// that recall afterward: the light is already on, so the next start sees no
 // off->on edge and leaves the room as it found it.
 func TestSIGTERMSendsTheRecallItWasHolding(t *testing.T) {
 	b, lights := kitchenBridge(t)
@@ -209,7 +209,7 @@ func TestSIGTERMSendsTheRecallItWasHolding(t *testing.T) {
 
 	d.signal(t, syscall.SIGTERM)
 	if code := d.wait(t, 20*time.Second); code != 0 {
-		t.Fatalf("a signalled daemon should exit 0, got %d; log:\n%s", code, d.log.String())
+		t.Fatalf("a signaled daemon should exit 0, got %d; log:\n%s", code, d.log.String())
 	}
 	if n := len(b.Recalls()); n != 1 {
 		t.Fatalf("the recall it was holding must reach the bridge, got %d; log:\n%s", n, d.log.String())
@@ -316,10 +316,10 @@ func unpairedBridge(t *testing.T) *httptest.Server {
 	return srv
 }
 
-// TestLogOutputWritesToTheFileItIsGiven covers the wiring between the flags and
-// internal/logfile: that --log-file redirects the logger off stderr, that the
-// directory is made rather than demanded, and that a negative cap is refused
-// even when there is no file for it to apply to, since it is a typo either way.
+// TestLogOutputWritesToTheFileItIsGiven covers the wiring between the flags
+// and internal/logfile. --log-file redirects the logger off stderr, and the
+// directory is made rather than demanded. A negative cap is refused even with
+// no file for it to apply to, since it is a typo either way.
 func TestLogOutputWritesToTheFileItIsGiven(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "logs", "test.log")
 	out, closeLog, err := logOutput(globals{logFile: path})

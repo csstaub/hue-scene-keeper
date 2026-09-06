@@ -11,10 +11,10 @@ import (
 	"strings"
 )
 
-// launchd, in the three facts that shape this file:
+// launchd, in the three facts this file is built on:
 //
 //   - The agent runs in the console user's GUI domain, not the system domain,
-//     so every target is scoped to this process's own uid. Running these
+//     so every target names this process's own uid. Running these
 //     commands under sudo would address root's domain and do nothing useful.
 //   - The plist sets KeepAlive, so `launchctl kill` is pointless - launchd
 //     restarts the job at once. Booting it out of the domain is the only stop
@@ -84,10 +84,10 @@ func start(ctx context.Context, out io.Writer, kill bool) error {
 	}
 	// RunAtLoad starts a freshly bootstrapped job, but one that was already
 	// loaded and idle needs the nudge. On a running job the plain form does
-	// nothing, which is what a restart is here to fix - but only a job that
-	// was loaded before we arrived gets the -k, because a freshly
-	// bootstrapped one is already the new process and killing it at once
-	// would just start it a third time.
+	// nothing, which is what a restart is here to fix. But only a job that
+	// was loaded before we arrived gets the -k. A freshly bootstrapped one is
+	// already the new process, and killing it at once would just start it a
+	// third time.
 	args := []string{"launchctl", "kickstart"}
 	if kill && wasLoaded {
 		args = append(args, "-k")

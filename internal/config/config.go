@@ -237,7 +237,7 @@ func (c *Config) applyDefaults() {
 	}
 	// A cap below the gap it is capping would fire every recall immediately,
 	// silently turning the debounce off. Raising it to the gap keeps the
-	// old fixed-window behavior, which is the closest honest reading.
+	// old fixed-window behavior, the closest reading of what was asked for.
 	if c.CoalesceMax >= 0 && c.CoalesceMax < c.CoalesceWindow {
 		c.CoalesceMax = c.CoalesceWindow
 	}

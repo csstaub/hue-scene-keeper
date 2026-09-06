@@ -40,12 +40,12 @@ CONSOLE_UID=$(/usr/bin/id -u "$CONSOLE_USER" 2>/dev/null || echo "")
 # per-user disabled database, and bootstrapping a disabled label fails with
 # "Bootstrap failed: 5: Input/output error". A label gets onto that list from
 # `launchctl disable` or a legacy `launchctl unload -w`, and it stays there even
-# after the plist is deleted -- so with enable last, an install that hit a
+# after the plist is deleted - so with enable last, an install that hit a
 # disabled label could never recover on its own.
 #
 # Everything the package installs is already on disk by this point, and the
 # plist sets RunAtLoad, so failing to start the agent *now* is not a failed
-# install -- it is an install that starts at the next login. Neither launchctl
+# install - it is an install that starts at the next login. Neither launchctl
 # call may abort the script under `set -e`: the installer would report "The
 # installation failed" for a machine that is in fact correctly installed, and
 # the user would reinstall to fix nothing. The bootstrap is retried because

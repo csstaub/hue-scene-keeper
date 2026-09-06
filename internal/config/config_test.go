@@ -555,7 +555,7 @@ func TestLogLevelIsNamedOrAbsent(t *testing.T) {
 
 // TestCoalesceMaxIsRaisedToTheWindow. A cap below the gap it caps would fire
 // every recall immediately, silently turning the debounce off. Raising it back
-// to the window is the closest honest reading of what was asked for.
+// to the window is the closest reading of what was asked for.
 func TestCoalesceMaxIsRaisedToTheWindow(t *testing.T) {
 	cfg, err := Load(writeConfig(t, "coalesce_window: 2s\ncoalesce_max: 500ms\n"))
 	if err != nil {

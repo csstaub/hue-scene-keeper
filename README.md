@@ -216,7 +216,7 @@ restart.
 restarts: ten in five minutes. A unit enabled before pairing gives up in under a
 minute with `start-request-repeated-too-quickly` and stays failed. That limit
 earns its keep. Without it, an unrecoverable error would restart-loop into the
-journal forever. But if you enabled the unit first and paired afterwards, you
+journal forever. But if you enabled the unit first and paired afterward, you
 have to clear the counter by hand:
 
 ```sh
