@@ -53,10 +53,16 @@ exclude:
   # Rooms and zones that are NEVER recalled - a full opt-out.
   # Accepts names or ids, case-insensitively.
   #
-  # Naming a zone here usually does nothing: a light is recalled as part of its
-  # room, and rooms win over zones, so a zone whose lights all have rooms is
-  # never the group being recalled. Exclude the room, or the individual lights,
-  # instead. The daemon warns at startup when an entry here cannot take effect.
+  # An excluded room also CEDES its lights to any zone that holds them: those
+  # lights are then governed by the zone and its scene. That is how you manage
+  # part of a room - zone the lights you want styled, give the zone its own
+  # Natural Light scene, and exclude the room; roommates in no zone are left
+  # entirely alone. It also means a room excluded to be left alone must not
+  # overlap a zone you have not also excluded.
+  #
+  # Naming a zone here does nothing while its lights' rooms are live: a light
+  # is recalled as part of its room, and rooms win over zones. The daemon
+  # warns at startup when an entry here cannot take effect.
   rooms: []
   #  - "Bedroom"
   #  - "Nursery"

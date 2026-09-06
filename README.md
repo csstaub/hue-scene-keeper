@@ -93,13 +93,29 @@ The two lists do different things, and the difference matters:
 
 | | Effect |
 |---|---|
-| `exclude.rooms` | The room or zone is **never recalled**. A full opt-out. |
+| `exclude.rooms` | The room or zone is **never recalled**, and an excluded room **cedes its lights** to any zone that holds them. |
 | `exclude.lights` | The light **never triggers** a recall. It is still turned on by a recall another light in its room caused. |
 
 So excluding a night stand lamp means switching it on at 2am won't light up the whole
 bedroom. It does *not* mean the lamp stays off when you switch on the ceiling light — that
 recall lights the whole room, night stand included. If you want a room left entirely alone,
-put it in `exclude.rooms`.
+put it in `exclude.rooms` — and make sure no zone overlaps it, because ceded lights fall
+to their zones (exclude those zones too if you have them).
+
+### Carving a light out of a room
+
+The ceding rule is how you manage *part* of a room. Say the bedroom has a ceiling light
+that should recall Natural Light, and a night light that should only ever be touched by
+hand:
+
+1. In the Hue app, make a zone holding just the ceiling light and give it a
+   Natural Light scene.
+2. Exclude the room: `exclude.rooms: ["Bedroom"]`.
+
+The room's exclusion hands the ceiling light to the zone, so switching it on recalls the
+*zone's* scene — which doesn't include the night light. The night light belongs to no
+group at all now: it never triggers anything and no recall ever touches it.
+`resolve <light>` shows exactly this reasoning per light.
 
 ## Commands
 
