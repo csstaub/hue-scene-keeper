@@ -1,7 +1,9 @@
 # systemd unit for hue-scene-keeper.
 #
-# Install:
-#   go tool mage go:build && sudo -E go tool mage go:install
+# Install (run go:install as yourself, not under sudo: it builds as you and
+# elevates only the copy into /usr/local/bin, whereas sudo would re-run the
+# compiler as root and leave root-owned entries in your Go caches):
+#   go tool mage go:install
 #   sudo useradd --system --home-dir /var/lib/hue-scene-keeper --shell /usr/sbin/nologin hue
 #   sudo install -d -o hue -g hue -m0700 /var/lib/hue-scene-keeper
 #   sudo install -d -m0755 /etc/hue-scene-keeper
@@ -18,6 +20,14 @@
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now hue-scene-keeper
 #   journalctl -u hue-scene-keeper -f
+#
+# Enabling before pairing is not fatal but is not self-healing either: with no
+# credentials `run` exits at once, and Restart=always at RestartSec=5s burns
+# StartLimitBurst in under a minute, leaving the unit failed with
+# "start-request-repeated-too-quickly". systemd will not start it again, even
+# once the credentials exist, until the counter is cleared:
+#   sudo systemctl reset-failed hue-scene-keeper
+#   sudo systemctl start hue-scene-keeper
 
 [Unit]
 Description=Keep Philips Hue rooms in their all-day smart scene
