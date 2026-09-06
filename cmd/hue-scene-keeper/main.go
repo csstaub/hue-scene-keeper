@@ -338,15 +338,29 @@ func describeBridges(bridges []hue.BridgeInfo) string {
 	return strings.Join(parts, ", ")
 }
 
-// newClient builds a bridge client wired to the persisted key and TLS pin.
-// A pin learned on first contact is written back to the credentials file.
-func newClient(cfg *config.Config, creds *config.Credentials, addr string) *hue.Client {
-	pin := hue.NewPin(creds.CertPin)
-	pin.OnLearn = func(value string) error {
+// persistPin returns the callback hue.Pin invokes the first time it sees a
+// bridge certificate.
+//
+// It writes the file, because that is the whole of the contract: the Pin
+// refuses to trust a certificate it could not persist, so a callback that only
+// sets a field in memory satisfies the signature and not the promise. Where it
+// was written that way - in `auth`, which saves once at the end - a pairing
+// that never finished left this process trusting a key nothing had recorded,
+// and the next run walked back into the trust-on-first-use window with nothing
+// said. The Pin holds no lock while this runs, so the fsync is its own affair.
+func persistPin(creds *config.Credentials, addr string) func(string) error {
+	return func(value string) error {
 		creds.CertPin = value
 		creds.Address = addr
 		return creds.Save()
 	}
+}
+
+// newClient builds a bridge client wired to the persisted key and TLS pin.
+// A pin learned on first contact is written back to the credentials file.
+func newClient(cfg *config.Config, creds *config.Credentials, addr string) *hue.Client {
+	pin := hue.NewPin(creds.CertPin)
+	pin.OnLearn = persistPin(creds, addr)
 	return hue.New(hue.Options{
 		Address:           addr,
 		AppKey:            creds.AppKey,
@@ -413,7 +427,15 @@ func cmdAuth(ctx context.Context, g globals, log *slog.Logger) error {
 		creds.CertPin = ""
 	}
 	pin := hue.NewPin(creds.CertPin)
-	pin.OnLearn = func(value string) error { creds.CertPin = value; return nil }
+	// Written to disk as it is learned, not kept until the pairing succeeds.
+	// The handshake that learns it happens on the first attempt, minutes before
+	// the user gets round to the link button, and everything after that -
+	// giving up, Ctrl-C, closing the laptop - left this process having trusted
+	// a certificate the next one knew nothing about. Save with no application
+	// key is safe here: it refuses to overwrite an existing key with a blank
+	// one, and this is a file that either has no key yet or keeps the one it
+	// has.
+	pin.OnLearn = persistPin(creds, addr)
 	client := hue.New(hue.Options{Address: addr, Pin: pin})
 
 	fmt.Printf("Pairing with bridge %s (%s) at %s\n", info.Name, info.ID, addr)

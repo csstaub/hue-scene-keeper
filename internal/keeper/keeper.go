@@ -59,6 +59,18 @@ const recallQueue = 256
 // spaces retries out, so a house-wide wave of them queues rather than collides.
 var recallBackoff = []time.Duration{time.Second, 3 * time.Second}
 
+// drainGrace bounds the shutdown drain: how long dispatch may go on finishing
+// the recalls it is holding after the daemon has been asked to stop.
+//
+// Long enough for a recall the bridge has already accepted to come back, and
+// for one it has not yet been sent to go out and be answered - a LAN round trip
+// against a healthy bridge is milliseconds. Short enough to sit well inside
+// systemd's default 90s TimeoutStopSec and launchd's 20s, and short enough that
+// nobody watching a `systemctl restart` learns to reach for kill -9. A bridge
+// that has stopped answering costs the whole of it, once, which is why it is
+// three seconds and not thirty.
+const drainGrace = 3 * time.Second
+
 type triggerKind int
 
 const (
@@ -261,24 +273,47 @@ const streamGiveUp = 12
 // Run syncs the registry, then consumes the event stream until ctx is
 // cancelled. It returns ctx.Err() on shutdown, or hue.ErrStreamUnreachable if
 // the bridge stopped answering at the address it was given.
+//
+// Waiting for the goroutines it started is what makes Run's return mean
+// "nothing of mine is still running" - including the network calls a
+// power-restore lookup may be part-way through, and the shutdown drain.
 func (k *Keeper) Run(ctx context.Context) error {
-	// Dispatch and the lookup workers all stop on ctx, and Stream only returns
-	// once ctx is cancelled, so waiting here is what makes Run's return mean
-	// "nothing of mine is still running" - including the network calls a
-	// power-restore lookup may be part-way through.
+	// The goroutines stop when Run is finished with them, not only when the
+	// caller's context ends. Stream also returns on its own - a revoked
+	// application key, a pin mismatch, MaxConsecutiveFailures - and goroutines
+	// watching only the caller's context would then never return, leaving Run
+	// waiting forever on them: a process alive, quiet, and recalling nothing,
+	// which is the outcome Stream's giving up exists to avoid.
+	workCtx, stopWork := context.WithCancel(ctx)
+	defer stopWork()
+
+	// The sender outlives the rest by the drain's grace period. Cancelling it
+	// with everything else would tear down the request already on the wire and
+	// abandon the ones the drain is about to hand it, which is the loss the
+	// drain is there to prevent. Nothing can enter sendQ once dispatch has
+	// gone, and Run stops it below the moment dispatch is done.
+	sendCtx, stopSending := context.WithCancel(context.WithoutCancel(ctx))
+	defer stopSending()
+
 	var workers sync.WaitGroup
-	start := func(name string, fn func(context.Context)) {
+	start := func(name string, runCtx context.Context, fn func(context.Context)) {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
 			defer k.logPanic(name)
-			fn(ctx)
+			fn(runCtx)
 		}()
 	}
-	start("dispatch", k.dispatch)
-	start("sender", k.sender)
+	dispatchDone := make(chan struct{})
+	start("dispatch", workCtx, func(ctx context.Context) {
+		// Closed as the panic unwinds too, so a dead dispatch goroutine does
+		// not leave Run waiting below for a drain that will never happen.
+		defer close(dispatchDone)
+		k.dispatch(ctx)
+	})
+	start("sender", sendCtx, k.sender)
 	for range maxDeviceLookups {
-		start("lookup", k.lookupWorker)
+		start("lookup", workCtx, k.lookupWorker)
 	}
 
 	err := k.client.Stream(ctx, hue.StreamOptions{
@@ -287,6 +322,12 @@ func (k *Keeper) Run(ctx context.Context) error {
 		MaxConsecutiveFailures: streamGiveUp,
 	}, k.HandleEvents)
 
+	// Dispatch first, and only then the sender: the drain runs on dispatch and
+	// the requests it makes are the sender's, so stopping the sender any
+	// earlier would cut off the very work being waited for.
+	stopWork()
+	<-dispatchDone
+	stopSending()
 	workers.Wait()
 	return err
 }
@@ -645,6 +686,7 @@ func (k *Keeper) dispatch(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			k.shutdown(pending)
 			return
 
 		case t := <-k.triggers:
@@ -788,6 +830,70 @@ func (k *Keeper) drain(pending map[string]*pendingRecall) {
 		// to cause must not find it.
 		delete(pending, p.groupID)
 		k.commit(p)
+	}
+}
+
+// shutdown makes one bounded attempt to finish the work dispatch is holding
+// when the daemon is told to stop, and says plainly what it could not finish.
+//
+// A recall lost here is not recovered by restarting. The light that caused it
+// is already on, so the resync on the next start sees it as it has always been
+// and no off->on edge ever occurs; onConnect's first-connect branch does no
+// diffing, and cannot, because it has no earlier state to diff against. The
+// room simply stays as whatever put it there until someone flips a switch. A
+// `systemctl restart`, or a package upgrade, landing in the seconds after
+// somebody walked into a room is exactly that case, so the entries are sent
+// rather than dropped.
+//
+// Everything here still runs on the dispatch goroutine: commit arms
+// suppression, finish rolls it back, and neither is reached from anywhere
+// else, so the single-goroutine ownership of suppressUntil/lastRecall/inFlight
+// holds through shutdown as it does everywhere else. What the grace period
+// cannot cover keeps its window armed with no rollback, which is safe for
+// exactly one reason - this Keeper is being thrown away. Run returns straight
+// after, and the caller either exits or builds a fresh Keeper with fresh maps.
+// Nothing that survives this function ever reads that state again.
+func (k *Keeper) shutdown(pending map[string]*pendingRecall) {
+	if len(pending) == 0 && len(k.inFlight) == 0 {
+		return
+	}
+	deadline := time.NewTimer(drainGrace)
+	defer deadline.Stop()
+
+	// Oldest group first, the order drain would have sent them in: the room
+	// you walked into first is still styled first.
+	ready := make([]*pendingRecall, 0, len(pending))
+	for _, p := range pending {
+		ready = append(ready, p)
+	}
+	sort.Slice(ready, func(i, j int) bool { return ready[i].seq < ready[j].seq })
+	for _, p := range ready {
+		if k.inFlight[p.groupID] {
+			// The recall ahead of it is on the wire for this same group.
+			// Stacking a second one behind it would leave two entries fighting
+			// over one group's suppression state, which is no more acceptable
+			// on the way out than it is in drain.
+			continue
+		}
+		delete(pending, p.groupID)
+		k.commit(p)
+	}
+
+	for len(k.inFlight) > 0 {
+		select {
+		case res := <-k.results:
+			// finish may put a failed recall back in pending for a retry. No
+			// timer will ever fire for it now; it is counted as dropped below
+			// rather than quietly forgotten.
+			k.finish(pending, res)
+		case <-deadline.C:
+			k.log.Warn("shutting down before the bridge answered, dropping recalls",
+				"in_flight", len(k.inFlight), "pending", len(pending), "after", drainGrace)
+			return
+		}
+	}
+	if n := len(pending); n > 0 {
+		k.log.Warn("dropping pending recalls at shutdown", "count", n)
 	}
 }
 

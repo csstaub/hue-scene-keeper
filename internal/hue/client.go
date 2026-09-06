@@ -148,8 +148,20 @@ func Retryable(err error) bool {
 type Pin struct {
 	mu    sync.Mutex
 	value string
+	// learning serialises the trust-on-first-use path, so that exactly one
+	// handshake learns however many arrive at once. It exists because mu is
+	// deliberately not held across OnLearn: see verify.
+	learning sync.Mutex
 	// OnLearn, if set, is called once when a pin is first recorded so the
-	// caller can persist it.
+	// caller can persist it - and it must genuinely persist, because the pin is
+	// not trusted unless it returns nil.
+	//
+	// It is called with none of the Pin's locks held, from inside the TLS
+	// handshake, so it may read Value() and may take as long as an fsync'd
+	// write needs. What it must not do is drive a fresh handshake against this
+	// same Pin: that re-enters verify, which is the one thing the learning lock
+	// cannot let through. Set it before the first connection; it is read once,
+	// under mu, and never written from here.
 	OnLearn func(pin string) error
 }
 
@@ -175,25 +187,51 @@ func (p *Pin) verify(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 	got := base64.StdEncoding.EncodeToString(sum[:])
 
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.value == "" {
-		// Persist before committing. If the save fails and we kept the pin in
-		// memory anyway, this process would carry on happily while nothing was
-		// written - so every restart would re-enter the trust-on-first-use
-		// window with no warning that pinning had silently stopped working.
-		if p.OnLearn != nil {
-			if err := p.OnLearn(got); err != nil {
-				return fmt.Errorf("refusing to trust bridge certificate: could not persist pin: %w", err)
-			}
+	have, onLearn := p.value, p.OnLearn
+	p.mu.Unlock()
+	if have != "" {
+		return matchPin(have, got)
+	}
+
+	// Learning. The lock held from here is not mu: OnLearn writes the pin to
+	// disk, fsync and all, and this is a VerifyPeerCertificate callback on the
+	// TLS handshake goroutine - so holding the lock that Value() takes across
+	// it means any callback that reads its own Pin deadlocks the handshake. A
+	// second lock keeps the "learned exactly once" guarantee without that.
+	p.learning.Lock()
+	defer p.learning.Unlock()
+
+	// Another handshake may have learned while we waited for the lock, in
+	// which case this one is an ordinary check against what it recorded.
+	p.mu.Lock()
+	have = p.value
+	p.mu.Unlock()
+	if have != "" {
+		return matchPin(have, got)
+	}
+
+	// Persist before committing. If the save fails and we kept the pin in
+	// memory anyway, this process would carry on happily while nothing was
+	// written - so every restart would re-enter the trust-on-first-use
+	// window with no warning that pinning had silently stopped working.
+	if onLearn != nil {
+		if err := onLearn(got); err != nil {
+			return fmt.Errorf("refusing to trust bridge certificate: could not persist pin: %w", err)
 		}
-		p.value = got
+	}
+	p.mu.Lock()
+	p.value = got
+	p.mu.Unlock()
+	return nil
+}
+
+// matchPin reports whether the certificate we were shown is the one we pinned.
+func matchPin(have, got string) error {
+	if have == got {
 		return nil
 	}
-	if p.value != got {
-		return fmt.Errorf("%w (pinned %s, got %s); if you replaced or factory-reset the bridge, re-pair with `hue-scene-keeper auth --reset-pin`",
-			ErrPinMismatch, p.value, got)
-	}
-	return nil
+	return fmt.Errorf("%w (pinned %s, got %s); if you replaced or factory-reset the bridge, re-pair with `hue-scene-keeper auth --reset-pin`",
+		ErrPinMismatch, have, got)
 }
 
 // limiter is a token bucket without burst: it spaces requests evenly.
