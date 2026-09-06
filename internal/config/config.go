@@ -179,6 +179,18 @@ func Load(path string) (*Config, error) {
 		}
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
+	// A stream of documents decodes only its first one, so everything after a
+	// `---` would be a whole file of settings that silently does nothing -
+	// KnownFields' failure mode at a larger granularity. There is no reading of
+	// a second document we could honour, so it is an error rather than a merge.
+	var extra yaml.Node
+	switch err := dec.Decode(&extra); {
+	case err == nil:
+		return nil, fmt.Errorf("parse %s: line %d starts a second YAML document; "+
+			"only the first is read, so everything after the `---` would be ignored", path, extra.Line)
+	case !errors.Is(err, io.EOF):
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
 	cfg.applyDefaults()
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -186,40 +198,73 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
+// applyDefaults fills in anything left at zero.
+//
+// Zero means "default", never "off". There are no pointer fields here, so a key
+// that is absent and one written as `recall_cooldown: 0` arrive as the same
+// value and cannot be told apart; filling both is the only consistent reading.
+// A *negative* value is a different matter - nothing fills it in, and validate
+// rejects it, because quietly running the 5s default for `recall_cooldown: -5s`
+// is precisely the silent no-op this package exists to refuse.
 func (c *Config) applyDefaults() {
 	if strings.TrimSpace(c.SceneName) == "" {
 		c.SceneName = DefaultSceneName
 	}
-	if c.RecallCooldown <= 0 {
+	if c.RecallCooldown == 0 {
 		c.RecallCooldown = Duration(5 * time.Second)
 	}
-	if c.CoalesceWindow <= 0 {
+	if c.CoalesceWindow == 0 {
 		c.CoalesceWindow = Duration(300 * time.Millisecond)
 	}
-	if c.CoalesceMax <= 0 {
+	if c.CoalesceMax == 0 {
 		c.CoalesceMax = Duration(3 * time.Second)
 	}
 	// A cap below the gap it is capping would fire every recall immediately,
 	// silently turning the debounce off. Raising it to the gap keeps the
 	// old fixed-window behaviour, which is the closest honest reading.
-	if c.CoalesceMax < c.CoalesceWindow {
+	if c.CoalesceMax >= 0 && c.CoalesceMax < c.CoalesceWindow {
 		c.CoalesceMax = c.CoalesceWindow
 	}
-	if c.MinRecallInterval.Duration() < MinRecallFloor {
+	// The floor, which is not configurable away, and which doubles as the
+	// default. A negative is left alone so validate can name it, rather than
+	// have it arrive downstream as a legal-looking ten seconds.
+	if c.MinRecallInterval >= 0 && c.MinRecallInterval.Duration() < MinRecallFloor {
 		c.MinRecallInterval = Duration(MinRecallFloor)
 	}
 	// NaN satisfies neither this nor the ceiling in validate, so without the
 	// explicit test it survives untouched and the derived limiter interval
 	// comes out zero or negative - no rate limiting at all.
-	if math.IsNaN(c.Bridge.RequestsPerSecond) || c.Bridge.RequestsPerSecond <= 0 {
+	if math.IsNaN(c.Bridge.RequestsPerSecond) || c.Bridge.RequestsPerSecond == 0 {
 		c.Bridge.RequestsPerSecond = DefaultRequestsPerSecond
 	}
-	if c.Bridge.RequestTimeout <= 0 {
+	if c.Bridge.RequestTimeout == 0 {
 		c.Bridge.RequestTimeout = Duration(hue.DefaultRequestTimeout)
 	}
 }
 
 func (c *Config) validate() error {
+	// Negatives first, so one is named for what it is instead of being caught
+	// by a ceiling or a floor further down under a misleading message. Nothing
+	// here means anything below zero, and applyDefaults deliberately leaves
+	// negatives intact so they reach this check.
+	for _, knob := range []struct {
+		name string
+		d    time.Duration
+	}{
+		{"recall_cooldown", c.RecallCooldown.Duration()},
+		{"min_recall_interval", c.MinRecallInterval.Duration()},
+		{"coalesce_window", c.CoalesceWindow.Duration()},
+		{"coalesce_max", c.CoalesceMax.Duration()},
+		{"bridge.request_timeout", c.Bridge.RequestTimeout.Duration()},
+	} {
+		if knob.d < 0 {
+			return fmt.Errorf("%s %s is negative; omit the line to get the default", knob.name, knob.d)
+		}
+	}
+	if c.Bridge.RequestsPerSecond < 0 {
+		return fmt.Errorf("bridge.requests_per_second %g is negative; omit the line to get the default",
+			c.Bridge.RequestsPerSecond)
+	}
 	if c.CoalesceWindow.Duration() > 5*time.Second {
 		return fmt.Errorf("coalesce_window %s is too long to feel responsive", c.CoalesceWindow.Duration())
 	}
@@ -306,11 +351,53 @@ func CleanAddress(addr string) (string, error) {
 		if host == "" {
 			return "", fmt.Errorf("%q has no host", addr)
 		}
-		if _, err := strconv.Atoi(port); err != nil {
-			return "", fmt.Errorf("%q has an invalid port", addr)
+		// ParseUint at 16 bits, not Atoi: Atoi accepts "-1", "0" and "99999"
+		// alike, and all three reach net/url as a URL it rejects with an error
+		// naming neither the config key nor the port.
+		if n, err := strconv.ParseUint(port, 10, 16); err != nil || n == 0 {
+			return "", fmt.Errorf("%q has an invalid port; ports run from 1 to 65535", addr)
 		}
+		if err := checkHost(host); err != nil {
+			return "", fmt.Errorf("%q %w", addr, err)
+		}
+		return clean, nil
+	}
+	if err := checkHost(clean); err != nil {
+		return "", fmt.Errorf("%q %w", addr, err)
+	}
+	// A bare IPv6 literal has to be bracketed before it can be spliced into a
+	// URL; unbracketed it reads as an empty host with a nonsense port.
+	if ip := net.ParseIP(clean); ip != nil && ip.To4() == nil {
+		return "[" + clean + "]", nil
 	}
 	return clean, nil
+}
+
+// checkHost rejects anything that is neither an IP literal nor a plausible
+// hostname. Without it `address: "hello world"` is spliced into the URL
+// "https://hello world/clip/v2", and the user gets a net/url parse error that
+// names no config key at all - the baffling error CleanAddress exists to
+// prevent. Underscores are tolerated because some home routers hand them out.
+func checkHost(host string) error {
+	if net.ParseIP(host) != nil {
+		return nil
+	}
+	if len(host) > 253 {
+		return errors.New("is too long to be a hostname")
+	}
+	for _, label := range strings.Split(strings.TrimSuffix(host, "."), ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return errors.New("is not a host or host:port")
+		}
+		for _, r := range label {
+			switch {
+			case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			default:
+				return fmt.Errorf("is not a host or host:port: %q cannot appear in a hostname", r)
+			}
+		}
+	}
+	return nil
 }
 
 // DefaultConfigPath is ~/.config/hue-scene-keeper/config.yaml, honouring
@@ -392,6 +479,10 @@ func ResolveExclusions(c *Config, reg Lookup) *Exclusions {
 	for _, want := range c.Exclude.Lights {
 		key := normalise(want)
 		if key == "" {
+			// A blank entry protects nothing, and was the one inert config
+			// line this package dropped without a word. Quoted, so an entry
+			// that is empty or all spaces is visible in the warning.
+			ex.Unmatched = append(ex.Unmatched, "exclude.lights: "+strconv.Quote(want))
 			continue
 		}
 		matched := false
@@ -410,6 +501,7 @@ func ResolveExclusions(c *Config, reg Lookup) *Exclusions {
 	for _, want := range c.Exclude.Rooms {
 		key := normalise(want)
 		if key == "" {
+			ex.Unmatched = append(ex.Unmatched, "exclude.rooms: "+strconv.Quote(want))
 			continue
 		}
 		var matched []hue.Group
