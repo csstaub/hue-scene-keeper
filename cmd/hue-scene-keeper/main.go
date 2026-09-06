@@ -411,7 +411,7 @@ func persistPin(creds *config.Credentials, addr string) func(string) error {
 
 // newClient builds a bridge client wired to the persisted key and TLS pin.
 // A pin learned on first contact is written back to the credentials file.
-func newClient(cfg *config.Config, creds *config.Credentials, addr string) *hue.Client {
+func newClient(cfg *config.Config, creds *config.Credentials, addr string, log *slog.Logger) *hue.Client {
 	pin := hue.NewPin(creds.CertPin)
 	pin.OnLearn = persistPin(creds, addr)
 	return hue.New(hue.Options{
@@ -420,6 +420,7 @@ func newClient(cfg *config.Config, creds *config.Credentials, addr string) *hue.
 		Pin:               pin,
 		RequestsPerSecond: cfg.Bridge.RequestsPerSecond,
 		RequestTimeout:    cfg.Bridge.RequestTimeout.Duration(),
+		Logger:            log,
 	})
 }
 
@@ -550,7 +551,7 @@ func connect(ctx context.Context, g globals, log *slog.Logger) (*config.Config, 
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	return cfg, newClient(cfg, creds, addr), registry.New(), nil
+	return cfg, newClient(cfg, creds, addr, log), registry.New(), nil
 }
 
 // prepare connects and syncs the registry, for the read-only commands.
@@ -715,7 +716,7 @@ func cmdRun(ctx context.Context, g globals, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	client := newClient(cfg, creds, addr)
+	client := newClient(cfg, creds, addr, log)
 	reg := registry.New()
 
 	if creds.CertPin == "" {
@@ -777,7 +778,7 @@ func cmdRun(ctx context.Context, g globals, log *slog.Logger) error {
 		}
 		// A fresh registry: whatever we cached is now of unknown age, and
 		// onConnect's reconnect diff would read it as the state we last saw.
-		client = newClient(cfg, creds, addr)
+		client = newClient(cfg, creds, addr, log)
 		reg = registry.New()
 		log.Info("reconnecting to bridge", "bridge", addr)
 	}

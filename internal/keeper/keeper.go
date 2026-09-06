@@ -111,6 +111,11 @@ type deviceLookup struct {
 	groupID  string
 	lightIDs []string
 	reason   string
+
+	// queuedAt is the earliest trigger folded into this lookup, passed on to
+	// the light trigger the lookup emits so the recall's end-to-end time
+	// includes the lookup's own round trips.
+	queuedAt time.Time
 }
 
 // recall is a resolved, ready-to-send action.
@@ -165,6 +170,17 @@ type pendingRecall struct {
 	hadRecall    bool
 	armedUntil   time.Time
 	prevSuppress []groupSuppression
+
+	// Timing stamps, real clock, read only by finish's log line. triggeredAt
+	// is when the event behind this entry was seen, committedAt when commit
+	// handed it to the sender, sentAt when the sender picked it up. sentAt is
+	// written by the sender, which owns the entry at that moment, so the
+	// single-owner rule in the comment above still holds. A retry overwrites
+	// committedAt and sentAt but keeps triggeredAt, so its total honestly
+	// includes the backoff it waited out.
+	triggeredAt time.Time
+	committedAt time.Time
+	sentAt      time.Time
 }
 
 // groupSuppression is one group's suppression deadline as commit found it,
@@ -444,6 +460,7 @@ func (k *Keeper) onConnect(ctx context.Context) error {
 // Resync refreshes the resource cache and re-resolves the exclusion lists
 // against it, logging any config entry that matched nothing.
 func (k *Keeper) Resync(ctx context.Context) error {
+	start := time.Now()
 	if err := k.reg.Sync(ctx, k.client); err != nil {
 		return err
 	}
@@ -454,7 +471,8 @@ func (k *Keeper) Resync(ctx context.Context) error {
 
 	lights, rooms, zones, scenes := k.reg.Counts()
 	k.log.Info("synced bridge resources",
-		"lights", lights, "rooms", rooms, "zones", zones, "smart_scenes", scenes)
+		"lights", lights, "rooms", rooms, "zones", zones, "smart_scenes", scenes,
+		"took", time.Since(start).Round(time.Millisecond))
 
 	for id, name := range excl.GroupNames {
 		k.log.Info("excluded group (never recalled)", "group", name, "id", id)
@@ -599,6 +617,9 @@ func (k *Keeper) merge(action string, raw json.RawMessage) {
 // emit queues a trigger without blocking the caller. Dropping under extreme
 // load is better than stalling the stream reader and losing events entirely.
 func (k *Keeper) emit(t trigger) {
+	if t.at.IsZero() {
+		t.at = time.Now()
+	}
 	select {
 	case k.triggers <- t:
 	default:
@@ -784,9 +805,16 @@ func (k *Keeper) schedule(pending map[string]*pendingRecall, t trigger) bool {
 
 	now := schedNow()
 	k.seq++
-	p := &pendingRecall{recall: r, seq: k.seq, hardAt: now.Add(hard)}
+	p := &pendingRecall{recall: r, seq: k.seq, hardAt: now.Add(hard), triggeredAt: t.at}
+	if p.triggeredAt.IsZero() {
+		// Every real trigger is stamped by emit; this only covers a caller
+		// that built one by hand, so the log never shows a decades-long wait.
+		p.triggeredAt = now
+	}
 	p.fireAt = earlier(now.Add(window), p.hardAt)
 	pending[r.groupID] = p
+	k.log.Debug("scheduled recall", "group", r.groupName, "reason", r.reason,
+		"wait", p.fireAt.Sub(now).Round(time.Millisecond), "cap", hard)
 	return true
 }
 
@@ -844,6 +872,8 @@ func (k *Keeper) drain(pending map[string]*pendingRecall) {
 			// and an excluded light can no longer contribute to it at all.
 			p.fireAt = schedNow().Add(k.coalesceWindow())
 			p.hardAt = later(p.hardAt, p.fireAt)
+			k.log.Debug("deferring recall, previous one for this group still on the wire",
+				"group", p.groupName)
 			continue
 		}
 		// Out of pending before the request goes anywhere: from here the
@@ -978,8 +1008,13 @@ func (k *Keeper) queueDeviceLookup(queued map[string]*deviceLookup, t trigger) {
 		}
 		item := queued[group.ID]
 		if item == nil {
-			item = &deviceLookup{groupID: group.ID, reason: t.reason}
+			item = &deviceLookup{groupID: group.ID, reason: t.reason, queuedAt: t.at}
 			queued[group.ID] = item
+		}
+		if t.at.Before(item.queuedAt) {
+			// A merged lookup answers for every trigger folded into it, so its
+			// timing starts at the oldest of them.
+			item.queuedAt = t.at
 		}
 		if !slices.Contains(item.lightIDs, lightID) {
 			item.lightIDs = append(item.lightIDs, lightID)
@@ -1037,7 +1072,9 @@ func (k *Keeper) runLookup(ctx context.Context, item deviceLookup) {
 			continue
 		}
 		if light.On != nil && light.On.On {
-			k.emit(trigger{kind: kindLight, id: id, reason: item.reason})
+			// Carry the original trigger's stamp so the recall's end-to-end
+			// time includes the lookup, not just what came after it.
+			k.emit(trigger{kind: kindLight, id: id, reason: item.reason, at: item.queuedAt})
 			return
 		}
 	}
@@ -1186,6 +1223,7 @@ func (k *Keeper) commit(p *pendingRecall) bool {
 	p.armedUntil = now.Add(cooldown)
 	p.prevSuppress = k.armSuppression(r.groupID, p.armedUntil)
 	k.lastRecall[r.groupID] = now
+	p.committedAt = time.Now()
 
 	select {
 	case k.sendQ <- p:
@@ -1279,6 +1317,7 @@ func (k *Keeper) sender(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case p := <-k.sendQ:
+			p.sentAt = time.Now()
 			var err error
 			if !k.dryRun {
 				err = k.client.RecallSmartScene(ctx, p.sceneID)
@@ -1303,8 +1342,18 @@ func (k *Keeper) finish(pending map[string]*pendingRecall, res outcome) bool {
 		if k.dryRun {
 			msg = "would recall smart scene (dry run)"
 		}
+		now := time.Now()
+		// coalesce is the deliberate wait for the group to fall quiet, queue
+		// the time spent behind other recalls in sendQ, and request the
+		// limiter wait plus the HTTP round trip (the client's own debug line
+		// splits those further). Together they say where a slow recall's time
+		// went without a debugger attached.
 		k.log.Info(msg, "group", p.groupName, "scene", p.sceneName,
-			"trigger", p.lightName, "reason", p.reason)
+			"trigger", p.lightName, "reason", p.reason,
+			"coalesce", p.committedAt.Sub(p.triggeredAt).Round(time.Millisecond),
+			"queue", p.sentAt.Sub(p.committedAt).Round(time.Millisecond),
+			"request", now.Sub(p.sentAt).Round(time.Millisecond),
+			"total", now.Sub(p.triggeredAt).Round(time.Millisecond))
 		if k.onRecalled != nil {
 			k.onRecalled(p.recall)
 		}
@@ -1325,11 +1374,13 @@ func (k *Keeper) finish(pending map[string]*pendingRecall, res outcome) bool {
 		// A deleted scene or a revoked app key needs a human. Repeating it
 		// would only add load to a bridge that has already given its answer.
 		k.log.Error("recall failed", "group", p.groupName, "scene", p.sceneName,
-			"attempts", attempts, "err", res.err)
+			"attempts", attempts, "request", time.Since(p.sentAt).Round(time.Millisecond),
+			"err", res.err)
 		return false
 	case attempts > len(recallBackoff):
 		k.log.Error("recall failed, giving up", "group", p.groupName,
-			"scene", p.sceneName, "attempts", attempts, "err", res.err)
+			"scene", p.sceneName, "attempts", attempts,
+			"request", time.Since(p.sentAt).Round(time.Millisecond), "err", res.err)
 		return false
 	}
 
@@ -1349,7 +1400,8 @@ func (k *Keeper) finish(pending map[string]*pendingRecall, res outcome) bool {
 	p.hardAt = p.fireAt
 	pending[p.groupID] = p
 	k.log.Warn("recall failed, retrying", "group", p.groupName, "scene", p.sceneName,
-		"attempt", attempts, "in", backoff, "err", res.err)
+		"attempt", attempts, "in", backoff,
+		"request", time.Since(p.sentAt).Round(time.Millisecond), "err", res.err)
 	return true
 }
 
