@@ -30,3 +30,6 @@ func Start(_ context.Context, _ io.Writer) error { return unsupported("start") }
 
 // Stop is not implemented on this platform.
 func Stop(_ context.Context, _ io.Writer) error { return unsupported("stop") }
+
+// Restart is not implemented on this platform.
+func Restart(_ context.Context, _ io.Writer) error { return unsupported("restart") }

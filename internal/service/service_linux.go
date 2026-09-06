@@ -73,6 +73,26 @@ func Start(ctx context.Context, out io.Writer) error {
 	return nil
 }
 
+// Restart restarts the unit, or starts it if it was stopped, and makes sure it
+// comes back at boot either way. The enable is what keeps restart's outcome
+// identical to start's: `systemctl restart` alone would happily bounce a
+// disabled unit into a state where it runs now and silently stays down after
+// the next reboot - neither of the two states start and stop promise.
+func Restart(ctx context.Context, out io.Writer) error {
+	s, err := detect(ctx)
+	if err != nil {
+		return err
+	}
+	if err := run(ctx, out, append(append([]string{}, s.base...), "enable", unit)...); err != nil {
+		return err
+	}
+	if err := run(ctx, out, append(append([]string{}, s.base...), "restart", unit)...); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(out, "restarted: %s unit %s, and it will start again at boot\n", s.where(), unit)
+	return nil
+}
+
 // Stop stops the unit and keeps it from coming back at boot.
 func Stop(ctx context.Context, out io.Writer) error {
 	s, err := detect(ctx)

@@ -23,10 +23,11 @@
     launchctl print-disabled gui/$(id -u)
 
   Pair first:  hue-scene-keeper auth
-  Logs:        tail -f ~/Library/Logs/hue-scene-keeper.log
+  Logs:        tail -F ~/Library/Logs/hue-scene-keeper.log
 
-  The log file is not rotated. If you leave this running for months, add a
-  newsyslog.d rule or redirect the daemon somewhere rotated.
+  Use tail -F and not -f: the daemon caps the log itself, and at the cap it
+  renames the file to .log.1 and starts a new one. -f follows the inode, so it
+  would sit quietly on the archive from then on.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -40,12 +41,22 @@
       directory is / rather than the home directory, so a system-wide plist has
       no other way to reach a per-user log. `exec` replaces the shell with the
       daemon, so launchd still supervises the real process.
+
+      --log-file hands the daemon the path so it can keep the file under a cap
+      (--log-max-mb, 8 by default, one previous file kept beside it). The
+      redirect stays as well, and points at the same file: it is what catches
+      what does not go through the logger - a runtime panic's stack, and the
+      few messages main prints before a logger exists. Those bytes are not
+      counted towards the cap, and after a rotation the shell's descriptors
+      trail into the .1 file. Both are fine at the volume involved: the process
+      is on its way out by the time it writes a stack, and launchd starts the
+      replacement with fresh descriptors.
     -->
     <key>ProgramArguments</key>
     <array>
         <string>/bin/sh</string>
         <string>-c</string>
-        <string>mkdir -p "$HOME/Library/Logs" &amp;&amp; exec /usr/local/bin/hue-scene-keeper run &gt;&gt; "$HOME/Library/Logs/hue-scene-keeper.log" 2&gt;&amp;1</string>
+        <string>L="$HOME/Library/Logs/hue-scene-keeper.log"; mkdir -p "$HOME/Library/Logs" &amp;&amp; exec /usr/local/bin/hue-scene-keeper run --log-file "$L" &gt;&gt; "$L" 2&gt;&amp;1</string>
     </array>
 
     <key>RunAtLoad</key>
@@ -61,7 +72,8 @@
       picked up on its own with no second command, but it also means the
       unpaired window is a restart loop. launchd has no equivalent of systemd's
       StartLimitBurst, so a wider throttle is the only way to keep that loop
-      from filling the log; 30s still recovers promptly from a real crash.
+      from churning through the log; 30s still recovers promptly from a real
+      crash. The cap bounds what that loop costs in disk, not in noise.
     -->
     <key>ThrottleInterval</key>
     <integer>30</integer>

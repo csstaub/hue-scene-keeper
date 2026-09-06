@@ -314,3 +314,46 @@ func unpairedBridge(t *testing.T) *httptest.Server {
 	t.Cleanup(srv.Close)
 	return srv
 }
+
+// TestLogOutputWritesToTheFileItIsGiven covers the wiring between the flags and
+// internal/logfile: that --log-file redirects the logger off stderr, that the
+// directory is made rather than demanded, and that a negative cap is refused
+// even when there is no file for it to apply to, since it is a typo either way.
+func TestLogOutputWritesToTheFileItIsGiven(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "logs", "test.log")
+	out, closeLog, err := logOutput(globals{logFile: path})
+	if err != nil {
+		t.Fatalf("logOutput: %v", err)
+	}
+	log, err := newLogger(out, "text", "info")
+	if err != nil {
+		t.Fatalf("newLogger: %v", err)
+	}
+	log.Info("hello from the daemon")
+	closeLog()
+
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(b), "hello from the daemon") {
+		t.Errorf("log file = %q, want the record in it", b)
+	}
+}
+
+func TestLogOutputDefaultsToStderr(t *testing.T) {
+	out, closeLog, err := logOutput(globals{})
+	if err != nil {
+		t.Fatalf("logOutput: %v", err)
+	}
+	defer closeLog()
+	if out != os.Stderr {
+		t.Errorf("logOutput() = %v, want os.Stderr", out)
+	}
+}
+
+func TestLogOutputRejectsANegativeCap(t *testing.T) {
+	if _, _, err := logOutput(globals{logMaxMB: -1}); err == nil {
+		t.Error("logOutput(-1) succeeded, want an error even with no --log-file")
+	}
+}

@@ -54,6 +54,19 @@ func loaded(ctx context.Context) bool {
 
 // Start loads the agent and makes sure it is running.
 func Start(ctx context.Context, out io.Writer) error {
+	return start(ctx, out, false)
+}
+
+// Restart bounces the agent, or starts it if it was stopped. `launchctl kill`
+// would restart a running daemon too - KeepAlive sees to that - but it leans
+// on the supervisor's reaction and does nothing at all for a stopped or idle
+// job. `kickstart -k` is launchd's own word for "run it fresh, whatever state
+// it is in now", which is the whole promise here.
+func Restart(ctx context.Context, out io.Writer) error {
+	return start(ctx, out, true)
+}
+
+func start(ctx context.Context, out io.Writer, kill bool) error {
 	plist, err := plistPath()
 	if err != nil {
 		return err
@@ -63,17 +76,30 @@ func Start(ctx context.Context, out io.Writer) error {
 	if err := run(ctx, out, "launchctl", "enable", target()); err != nil {
 		return err
 	}
-	if !loaded(ctx) {
+	wasLoaded := loaded(ctx)
+	if !wasLoaded {
 		if err := run(ctx, out, "launchctl", "bootstrap", domain(), plist); err != nil {
 			return err
 		}
 	}
 	// RunAtLoad starts a freshly bootstrapped job, but one that was already
-	// loaded and idle needs the nudge. On a running job this does nothing.
-	if err := run(ctx, out, "launchctl", "kickstart", target()); err != nil {
+	// loaded and idle needs the nudge. On a running job the plain form does
+	// nothing, which is what a restart is here to fix - but only a job that
+	// was loaded before we arrived gets the -k, because a freshly
+	// bootstrapped one is already the new process and killing it at once
+	// would just start it a third time.
+	args := []string{"launchctl", "kickstart"}
+	if kill && wasLoaded {
+		args = append(args, "-k")
+	}
+	if err := run(ctx, out, append(args, target())...); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(out, "started: launchd agent %s (%s)\n", Label, plist)
+	verb := "started"
+	if kill {
+		verb = "restarted"
+	}
+	_, _ = fmt.Fprintf(out, "%s: launchd agent %s (%s)\n", verb, Label, plist)
 	return nil
 }
 
@@ -154,10 +180,13 @@ func Status(ctx context.Context, out io.Writer, p Paths) error {
 	// GUI session never sees, which is exactly why they are printed.
 	printPath(out, "config:", p.Config, "")
 	printPath(out, "creds:", p.State, "")
-	// The log path is the redirect hard-coded in the deploy plist's
-	// ProgramArguments; the plist is installed verbatim, never templated.
+	// The log path is the --log-file hard-coded in the deploy plist's
+	// ProgramArguments; the plist is installed verbatim, never templated. The
+	// daemon keeps that file under --log-max-mb and renames it aside at the
+	// cap, so the note holds whatever size the plist asks for.
 	if home, err := os.UserHomeDir(); err == nil {
-		printPath(out, "logs:", filepath.Join(home, "Library", "Logs", binName+".log"), "")
+		printPath(out, "logs:", filepath.Join(home, "Library", "Logs", binName+".log"),
+			"capped; the previous one is beside it as .log.1")
 	}
 
 	_, _ = fmt.Fprintln(out, verdict(running))

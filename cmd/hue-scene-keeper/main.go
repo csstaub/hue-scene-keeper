@@ -11,6 +11,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -22,6 +23,7 @@ import (
 	"github.com/csstaub/hue-scene-keeper/internal/config"
 	"github.com/csstaub/hue-scene-keeper/internal/hue"
 	"github.com/csstaub/hue-scene-keeper/internal/keeper"
+	"github.com/csstaub/hue-scene-keeper/internal/logfile"
 	"github.com/csstaub/hue-scene-keeper/internal/registry"
 	"github.com/csstaub/hue-scene-keeper/internal/service"
 )
@@ -38,6 +40,8 @@ type globals struct {
 	dryRun     bool
 	logFormat  string
 	logLevel   string
+	logFile    string
+	logMaxMB   int
 	jsonOut    bool
 	resetPin   bool
 
@@ -115,6 +119,8 @@ func bindFlags(fs *flag.FlagSet, g *globals, def globals) {
 	fs.BoolVar(&g.dryRun, "dry-run", def.dryRun, "log intended recalls without sending them")
 	fs.StringVar(&g.logFormat, "log-format", def.logFormat, "log format: text or json")
 	fs.StringVar(&g.logLevel, "log-level", def.logLevel, "log level: debug, info, warn, error")
+	fs.StringVar(&g.logFile, "log-file", def.logFile, "write logs to this file instead of stderr, kept under --log-max-mb")
+	fs.IntVar(&g.logMaxMB, "log-max-mb", def.logMaxMB, "size cap for --log-file, in MiB; one previous file is kept beside it")
 	fs.BoolVar(&g.jsonOut, "json", def.jsonOut, "machine-readable output (list only)")
 	fs.BoolVar(&g.resetPin, "reset-pin", def.resetPin, "auth only: forget the pinned bridge certificate and learn it again")
 }
@@ -129,6 +135,7 @@ commands:
   run        watch the event stream and recall scenes (default)
   start      start the installed service (launchd agent or systemd unit)
   stop       stop it, and keep it stopped
+  restart    restart it, or start it if it was stopped
   status     report whether the service is running
   auth       pair with the bridge by pressing its link button
   discover   list Hue bridges found on the network
@@ -148,6 +155,7 @@ func run() error {
 		statePath:  config.DefaultStatePath(),
 		logFormat:  "text",
 		logLevel:   "info",
+		logMaxMB:   defaultLogMaxMB,
 	}
 
 	var g globals
@@ -197,7 +205,13 @@ func run() error {
 		args = sub.Args()
 	}
 
-	log, err := newLogger(g.logFormat, g.logLevel)
+	out, closeLog, err := logOutput(g)
+	if err != nil {
+		return err
+	}
+	defer closeLog()
+
+	log, err := newLogger(out, g.logFormat, g.logLevel)
 	if err != nil {
 		return err
 	}
@@ -236,6 +250,8 @@ func run() error {
 		return service.Start(ctx, os.Stdout)
 	case "stop":
 		return service.Stop(ctx, os.Stdout)
+	case "restart":
+		return service.Restart(ctx, os.Stdout)
 	case "status":
 		return service.Status(ctx, os.Stdout, service.Paths{Config: g.configPath, State: g.statePath})
 	default:
@@ -244,12 +260,48 @@ func run() error {
 	}
 }
 
+// defaultLogMaxMB is the size cap applied to --log-file. One previous file is
+// kept beside the live one, so the bytes on disk are bounded at twice this.
+const defaultLogMaxMB = 8
+
+// logOutput decides where the logger writes, and returns a function to close
+// it with.
+//
+// Without --log-file that is stderr, which is what a terminal wants, what
+// systemd hands to journald, and what the launchd plist redirects. With it,
+// the daemon owns the file itself and keeps it under a cap - the only way to
+// bound a file on macOS, where the log lives under a per-user $HOME that a
+// root-owned newsyslog rule cannot name and no pid file exists for it to
+// signal a reopen through.
+func logOutput(g globals) (io.Writer, func(), error) {
+	// Checked even without --log-file, because it is unambiguously a typo
+	// wherever it appears.
+	if g.logMaxMB < 0 {
+		return nil, nil, fmt.Errorf("--log-max-mb %d: must not be negative", g.logMaxMB)
+	}
+	if g.logFile == "" {
+		return os.Stderr, func() {}, nil
+	}
+	// Zero means the default, as it does everywhere in the config file and
+	// for the same reason: there are no pointer flags either, so an omitted
+	// one and an explicit --log-max-mb=0 arrive here indistinguishable.
+	mb := g.logMaxMB
+	if mb == 0 {
+		mb = defaultLogMaxMB
+	}
+	f, err := logfile.Open(g.logFile, int64(mb)<<20)
+	if err != nil {
+		return nil, nil, fmt.Errorf("--log-file %s: %w", g.logFile, err)
+	}
+	return f, func() { _ = f.Close() }, nil
+}
+
 // newLogger builds the logger, rejecting a level or format it does not know.
 //
 // Falling back silently means `--log-level=verbose` runs at info and the user
 // spends the next hour wondering where their debug output went. Every other
 // typo in this CLI is an error; these were the exception.
-func newLogger(format, level string) (*slog.Logger, error) {
+func newLogger(w io.Writer, format, level string) (*slog.Logger, error) {
 	var lvl slog.Level
 	if err := lvl.UnmarshalText([]byte(level)); err != nil {
 		return nil, fmt.Errorf("--log-level %q: want debug, info, warn or error", level)
@@ -258,9 +310,9 @@ func newLogger(format, level string) (*slog.Logger, error) {
 	var handler slog.Handler
 	switch {
 	case strings.EqualFold(format, "json"):
-		handler = slog.NewJSONHandler(os.Stderr, opts)
+		handler = slog.NewJSONHandler(w, opts)
 	case strings.EqualFold(format, "text"):
-		handler = slog.NewTextHandler(os.Stderr, opts)
+		handler = slog.NewTextHandler(w, opts)
 	default:
 		return nil, fmt.Errorf("--log-format %q: want text or json", format)
 	}

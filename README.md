@@ -122,14 +122,15 @@ group at all now: it never triggers anything and no recall ever touches it.
 | Command | Purpose |
 |---|---|
 | `run` | The daemon. This is the default. |
-| `start` / `stop` | Start or stop the installed service through launchd or systemd. |
+| `start` / `stop` / `restart` | Start, stop, or restart the installed service through launchd or systemd. |
 | `status` | Whether that service is running, and whether it comes back on its own. |
 | `auth` | Pair with the bridge via its link button. |
 | `discover` | List bridges found on the network. |
 | `list` | Rooms, zones, lights, and the smart scene each maps to. `--json` for raw output. |
 | `resolve <light>` | Explain exactly what would happen for one light, and why. |
 
-Useful flags: `--dry-run`, `--address`, `--config`, `--log-format=json`, `--log-level=debug`.
+Useful flags: `--dry-run`, `--address`, `--config`, `--log-format=json`, `--log-level=debug`,
+`--log-file`.
 Flags work either side of the subcommand — `run --dry-run` and `--dry-run run` are
 equivalent — and an unrecognised flag or stray argument is an error rather than
 being silently ignored.
@@ -162,7 +163,7 @@ cp deploy/dev.staub.hue-scene-keeper.plist ~/Library/LaunchAgents/
 launchctl enable gui/$(id -u)/dev.staub.hue-scene-keeper
 launchctl bootstrap gui/$(id -u) \
   ~/Library/LaunchAgents/dev.staub.hue-scene-keeper.plist
-tail -f ~/Library/Logs/hue-scene-keeper.log
+tail -F ~/Library/Logs/hue-scene-keeper.log
 ```
 
 The `enable` line matters and it has to come first. `hue-scene-keeper stop`
@@ -203,12 +204,37 @@ sudo systemctl start hue-scene-keeper
 
 Pairing before `systemctl enable --now`, as above, avoids this entirely.
 
+### Logs
+
+On Linux there is nothing to configure: the unit logs to the journal, and
+`journalctl` already bounds what it keeps.
+
+On macOS the agent writes to `~/Library/Logs/hue-scene-keeper.log`, and the
+daemon keeps that file under a cap itself — `--log-max-mb`, 8 MiB by default.
+At the cap it renames the file to `.log.1` and starts a new one, so there is
+always between one and two caps' worth of history and never more. That is a
+size limit rather than a rotation: exactly one old file is kept, and nothing
+older survives. `--log-max-mb=64` if you would rather keep more.
+
+Use `tail -F`, not `tail -f`. `-f` follows the file's inode, so once the log is
+renamed aside it keeps showing you the archive and appears to go quiet.
+
+The same works anywhere else you run the daemon by hand:
+
+```sh
+hue-scene-keeper run --log-file /var/log/hue-scene-keeper.log --log-max-mb 32
+```
+
+Without `--log-file` the daemon logs to stderr and nothing is capped, which is
+what a terminal, systemd, and a shell redirect of your own all want.
+
 ### Starting and stopping it
 
 ```sh
 hue-scene-keeper status   # is anything running in the background?
 hue-scene-keeper stop     # stop it, and keep it stopped
 hue-scene-keeper start    # start it, and have it come back on its own again
+hue-scene-keeper restart  # bounce it, e.g. after editing the config
 ```
 
 `status` answers the question worth asking before a dry run:
