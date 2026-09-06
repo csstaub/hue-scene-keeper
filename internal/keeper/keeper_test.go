@@ -213,6 +213,142 @@ func TestExcludedRoomIsNeverRecalled(t *testing.T) {
 	}
 }
 
+// --- carve-out zones ---------------------------------------------------------
+
+// carveOutBridge is the pattern the exclusion-aware resolution exists for: a
+// bedroom holding a ceiling light and a night light, a zone over just the
+// ceiling light with its own Natural Light scene, and the bedroom excluded.
+// The room cedes the ceiling light to the zone; the night light, in no zone,
+// belongs to nothing and is only ever touched by hand. The room keeps a scene
+// of its own so a recall of the wrong group would be visible, not vacuous.
+func carveOutBridge(t *testing.T) (b *fake.Bridge, lights []string, cfg *config.Config) {
+	t.Helper()
+	b = fake.NewBridge(t)
+	lights = b.AddRoom("room-bedroom", "Bedroom", "Ceiling", "Night Light")
+	b.AddSmartScene(bedroomScene, "Natural Light", "room-bedroom", hue.TypeRoom)
+	b.AddZone("zone-ceiling", "Ceiling Zone", lights[0])
+	b.AddSmartScene("scene-ceiling", "Natural Light", "zone-ceiling", hue.TypeZone)
+	cfg = testConfig()
+	cfg.Exclude.Rooms = []string{"Bedroom"}
+	return b, lights, cfg
+}
+
+// TestExcludedRoomCedesItsLightToTheZone: the ceiling light coming on recalls
+// the zone's scene, not the room's, the night light stays dark through the
+// echo, and the echo does not feed a second recall.
+func TestExcludedRoomCedesItsLightToTheZone(t *testing.T) {
+	b, lights, cfg := carveOutBridge(t)
+	b.EchoOnRecall = true
+	_, reg := startKeeper(t, b, cfg)
+
+	b.SwitchLight(lights[0], true)
+	waitForRecalls(t, b, 1)
+	settle()
+	settle()
+
+	if got := b.Recalls(); len(got) != 1 || got[0] != "scene-ceiling" {
+		t.Fatalf("expected one recall of the zone's scene, got %v", got)
+	}
+	if on, known := reg.LightIsOn(lights[1]); known && on {
+		t.Fatal("the night light was turned on by the recall")
+	}
+}
+
+// TestLightWithEveryGroupExcludedNeverTriggers: the night light's room is
+// excluded and it is in no zone, so it belongs to nothing and its switch
+// touches nothing - not even the zone's scene.
+func TestLightWithEveryGroupExcludedNeverTriggers(t *testing.T) {
+	b, lights, cfg := carveOutBridge(t)
+	startKeeper(t, b, cfg)
+
+	b.SwitchLight(lights[1], true)
+	settle()
+
+	if got := b.Recalls(); len(got) != 0 {
+		t.Fatalf("the night light triggered a recall: %v", got)
+	}
+}
+
+// TestStartupRecallsTheCarveOutZone: apply_on_startup reaches a carve-out
+// light only through the zone's iteration - its room is skipped as excluded -
+// so the zone must both see the light and claim it as its own.
+func TestStartupRecallsTheCarveOutZone(t *testing.T) {
+	b, lights, cfg := carveOutBridge(t)
+	b.SetLightStateSilently(lights[0], true)
+	cfg.ApplyOnStartup = true
+	startKeeper(t, b, cfg)
+
+	waitForRecalls(t, b, 1)
+	settle()
+
+	if got := b.Recalls(); len(got) != 1 || got[0] != "scene-ceiling" {
+		t.Fatalf("expected one startup recall of the zone's scene, got %v", got)
+	}
+}
+
+// TestStartupSpendsAZoneTriggerOnALightItGoverns: a zone's one startup trigger
+// must not be spent on a light some live room owns. The zone lists the kitchen
+// light first, so a startup pass that emits on the first lit light would spend
+// the zone's trigger on a kitchen recall and never style the ceded light.
+func TestStartupSpendsAZoneTriggerOnALightItGoverns(t *testing.T) {
+	b := fake.NewBridge(t)
+	kitchen := b.AddRoom("room-kitchen", "Kitchen", "Ceiling K")
+	b.AddSmartScene(kitchenScene, "Natural Light", "room-kitchen", hue.TypeRoom)
+	bedroom := b.AddRoom("room-bedroom", "Bedroom", "Ceiling B")
+	b.AddZone("zone-mixed", "Mixed", kitchen[0], bedroom[0])
+	b.AddSmartScene("scene-mixed", "Natural Light", "zone-mixed", hue.TypeZone)
+	b.SetLightStateSilently(kitchen[0], true)
+	b.SetLightStateSilently(bedroom[0], true)
+
+	cfg := testConfig()
+	cfg.ApplyOnStartup = true
+	cfg.Exclude.Rooms = []string{"Bedroom"}
+	startKeeper(t, b, cfg)
+
+	waitForRecalls(t, b, 2)
+	settle()
+
+	got := b.Recalls()
+	counts := map[string]int{}
+	for _, id := range got {
+		counts[id]++
+	}
+	if len(got) != 2 || counts[kitchenScene] != 1 || counts["scene-mixed"] != 1 {
+		t.Fatalf("expected one recall each of the kitchen and the zone, got %v", got)
+	}
+}
+
+// TestACarveOutZoneRecallDoesNotFanOutIntoLiveRooms: a zone blending a ceded
+// light with a live room's lights sends its echo into that room, and the
+// suppression armed at commit has to be attributed with the same
+// exclusion-aware resolution that attributed the trigger - or the kitchen
+// schedules a recall off the back of ours.
+func TestACarveOutZoneRecallDoesNotFanOutIntoLiveRooms(t *testing.T) {
+	b := fake.NewBridge(t)
+	kitchen := b.AddRoom("room-kitchen", "Kitchen", "Ceiling K", "Counter K")
+	b.AddSmartScene(kitchenScene, "Natural Light", "room-kitchen", hue.TypeRoom)
+	bedroom := b.AddRoom("room-bedroom", "Bedroom", "Ceiling B")
+	b.AddZone("zone-mixed", "Mixed", append(append([]string{}, kitchen...), bedroom[0])...)
+	b.AddSmartScene("scene-mixed", "Natural Light", "zone-mixed", hue.TypeZone)
+	b.EchoOnRecall = true
+
+	cfg := testConfig()
+	cfg.Exclude.Rooms = []string{"Bedroom"}
+	startKeeper(t, b, cfg)
+
+	b.SwitchLight(bedroom[0], true)
+	waitForRecalls(t, b, 1)
+
+	// The kitchen's lights have just reported themselves on, off the back of
+	// our own recall. Neither may cause one.
+	settle()
+	settle()
+
+	if got := b.Recalls(); len(got) != 1 || got[0] != "scene-mixed" {
+		t.Fatalf("a carve-out zone recall fanned out: expected one recall of scene-mixed, got %v", got)
+	}
+}
+
 // TestPowerRestoreRecalls covers the case an off->on edge cannot see: the lamp
 // was on before its mains was cut, and is on again when it returns.
 func TestPowerRestoreRecalls(t *testing.T) {
@@ -308,7 +444,7 @@ func TestZoneIsUsedWhenLightHasNoRoom(t *testing.T) {
 	_, reg := startKeeperZone(t, b)
 
 	// The light is in a room, so the room wins - and that room has no scene.
-	if group, ok := reg.GroupForLight(lights[0]); !ok || group.ID != "room-none" {
+	if group, ok := reg.GroupForLight(lights[0], nil); !ok || group.ID != "room-none" {
 		t.Fatalf("expected the room to win over the zone, got %+v", group)
 	}
 
@@ -1108,7 +1244,7 @@ func TestAZoneRecallDoesNotFanOutIntoItsRooms(t *testing.T) {
 	// The strip loses its room, so the zone is what governs it.
 	b.Publish("delete", map[string]any{"id": "room-strip", "type": hue.TypeRoom})
 	waitFor(t, 5*time.Second, "the strip to become roomless", func() bool {
-		g, ok := reg.GroupForLight(strip[0])
+		g, ok := reg.GroupForLight(strip[0], nil)
 		return ok && g.ID == "zone-downstairs"
 	})
 

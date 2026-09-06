@@ -133,8 +133,11 @@ type Config struct {
 	SmartSceneOverrides map[string]string `yaml:"smart_scene_overrides"`
 
 	Exclude struct {
-		// Rooms are never recalled. A genuine full opt-out; also matches
-		// zones.
+		// Rooms are never recalled; also matches zones. Excluding a room
+		// additionally hands its lights to any non-excluded zone that holds
+		// them, which is how a zone carves a light out of a room: the zone's
+		// own smart scene then governs that light, and roommates in no zone
+		// are left entirely alone.
 		Rooms []string `yaml:"rooms"`
 		// Lights never *trigger* a recall. They are still lit by a recall
 		// caused by another light in the same room.
@@ -442,10 +445,10 @@ type Lookup interface {
 	Lights() []hue.Light
 	Rooms() []hue.Group
 	Zones() []hue.Group
-	// GroupShadowed reports whether every light in a group resolves to some
-	// other group, so the keeper can never select this one. See
-	// registry.Registry.GroupShadowed.
-	GroupShadowed(groupID string) bool
+	// GroupShadowed reports whether, under the given exclusions, every light
+	// in a group resolves to some other group, so the keeper can never select
+	// this one. excluded may be nil. See registry.Registry.GroupShadowed.
+	GroupShadowed(groupID string, excluded func(string) bool) bool
 }
 
 // Exclusions is the resolved form of the config's exclude lists: concrete ids,
@@ -509,6 +512,14 @@ func ResolveExclusions(c *Config, reg Lookup) *Exclusions {
 		}
 	}
 
+	// Two passes: effectiveness depends on the complete exclusion set, since
+	// an excluded room cedes its lights to zones and can thereby un-shadow a
+	// zone excluded further down the same list.
+	type match struct {
+		want   string
+		groups []hue.Group
+	}
+	var matches []match
 	for _, want := range c.Exclude.Rooms {
 		key := normalise(want)
 		if key == "" {
@@ -523,18 +534,22 @@ func ResolveExclusions(c *Config, reg Lookup) *Exclusions {
 				matched = append(matched, g)
 			}
 		}
-		switch {
-		case len(matched) == 0:
+		if len(matched) == 0 {
 			ex.Unmatched = append(ex.Unmatched, "exclude.rooms: "+want)
-		case allShadowed(reg, matched):
+			continue
+		}
+		matches = append(matches, match{want: want, groups: matched})
+	}
+	for _, m := range matches {
+		if allShadowed(reg, m.groups, ex.groups) {
 			// Typically a zone. Rooms beat zones when the keeper picks the
-			// group for a light, and on a real bridge every light is in a
-			// room, so excluding a zone excludes nothing at all. Reporting
+			// group for a light, so a zone whose lights all sit in live rooms
+			// is never selected and excluding it changes nothing. Reporting
 			// only exact typos would leave this case - a name the user spelled
 			// correctly, that still does nothing - as the one silent failure.
 			ex.Ineffective = append(ex.Ineffective, fmt.Sprintf(
-				"exclude.rooms: %s matches %s, but every light there belongs to a room as well, and the room wins - nothing is excluded",
-				want, describeGroups(matched)))
+				"exclude.rooms: %s matches %s, but every light there is governed by a group that is not excluded - nothing is excluded",
+				m.want, describeGroups(m.groups)))
 		}
 	}
 
@@ -550,9 +565,15 @@ func ResolveExclusions(c *Config, reg Lookup) *Exclusions {
 // to, i.e. the whole match is inert. A single usable group is enough for the
 // exclusion to do something, so a name shared by a room and a zone is not
 // reported.
-func allShadowed(reg Lookup, matched []hue.Group) bool {
+//
+// Each group is judged with its own exclusion peeled off: excluding a group
+// does something iff some light would resolve to it were it not excluded,
+// under the rest of the exclusions. Judging it under its own exclusion would
+// find every excluded group shadowed and report the whole list.
+func allShadowed(reg Lookup, matched []hue.Group, excluded map[string]bool) bool {
 	for _, g := range matched {
-		if !reg.GroupShadowed(g.ID) {
+		exceptSelf := func(id string) bool { return excluded[id] && id != g.ID }
+		if !reg.GroupShadowed(g.ID, exceptSelf) {
 			return false
 		}
 	}

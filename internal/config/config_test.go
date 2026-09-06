@@ -87,19 +87,27 @@ func TestInvalidDurationIsRejected(t *testing.T) {
 }
 
 // fakeLookup is a stand-in for the registry. shadowed names the groups whose
-// lights all resolve elsewhere, which on a real bridge is every zone.
+// lights all resolve elsewhere, which on a real bridge is every zone over live
+// rooms; shadowedFn, when set, answers instead and sees the exclusion
+// predicate, for the tests where shadowing depends on what is excluded.
 type fakeLookup struct {
-	lights   []hue.Light
-	rooms    []hue.Group
-	zones    []hue.Group
-	shadowed map[string]bool
+	lights     []hue.Light
+	rooms      []hue.Group
+	zones      []hue.Group
+	shadowed   map[string]bool
+	shadowedFn func(groupID string, excluded func(string) bool) bool
 }
 
 func (f fakeLookup) Lights() []hue.Light { return f.lights }
 func (f fakeLookup) Rooms() []hue.Group  { return f.rooms }
 func (f fakeLookup) Zones() []hue.Group  { return f.zones }
 
-func (f fakeLookup) GroupShadowed(groupID string) bool { return f.shadowed[groupID] }
+func (f fakeLookup) GroupShadowed(groupID string, excluded func(string) bool) bool {
+	if f.shadowedFn != nil {
+		return f.shadowedFn(groupID, excluded)
+	}
+	return f.shadowed[groupID]
+}
 
 func testLookup() fakeLookup {
 	return fakeLookup{
@@ -280,6 +288,39 @@ func TestIneffectiveExclusionsAreReported(t *testing.T) {
 				t.Errorf("group %s should still be excluded", tt.wantExcluded)
 			}
 		})
+	}
+}
+
+// TestIneffectiveExclusionSeesTheWholeList: effectiveness is judged under the
+// complete exclusion set with each group's own entry peeled off. A zone that
+// is shadowed only while its room is live stops being ineffective the moment
+// the same config excludes that room - the carve-out pattern - and a group is
+// never judged under its own exclusion, which would find the entire list
+// ineffective.
+func TestIneffectiveExclusionSeesTheWholeList(t *testing.T) {
+	look := testLookup()
+	look.shadowedFn = func(groupID string, excluded func(string) bool) bool {
+		if excluded != nil && excluded(groupID) {
+			t.Errorf("group %s judged under its own exclusion", groupID)
+		}
+		// The zone carves lights out of the room: shadowed only while the
+		// room is live.
+		return groupID == "z1" && (excluded == nil || !excluded("r1"))
+	}
+
+	cfg := Default()
+	cfg.Exclude.Rooms = []string{"Downstairs"}
+	if ex := ResolveExclusions(cfg, look); len(ex.Ineffective) != 1 {
+		t.Errorf("zone alone: Ineffective = %v, want 1 entry", ex.Ineffective)
+	}
+
+	cfg.Exclude.Rooms = []string{"Downstairs", "Bedroom"}
+	ex := ResolveExclusions(cfg, look)
+	if len(ex.Ineffective) != 0 {
+		t.Errorf("zone plus its room: Ineffective = %v, want none", ex.Ineffective)
+	}
+	if !ex.GroupExcluded("z1") || !ex.GroupExcluded("r1") {
+		t.Error("both groups should be excluded")
 	}
 }
 

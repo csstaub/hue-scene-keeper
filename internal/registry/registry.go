@@ -410,13 +410,22 @@ func (r *Registry) Group(id string) (hue.Group, bool) {
 // Rooms win over zones: a light belongs to exactly one room, but may belong to
 // several zones, and the room is the grouping the Hue app builds Natural Light
 // against.
-func (r *Registry) GroupForLight(lightID string) (hue.Group, bool) {
+//
+// Exclusion feeds the resolution rather than vetoing its result: an excluded
+// room cedes its lights to the first non-excluded zone holding them, which is
+// what lets a zone carve a light out of a room the daemon otherwise leaves
+// alone. A light whose room and zones are all excluded belongs to nothing.
+// excluded may be nil, meaning nothing is excluded.
+func (r *Registry) GroupForLight(lightID string, excluded func(string) bool) (hue.Group, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.groupForLightLocked(lightID)
+	return r.groupForLightLocked(lightID, excluded)
 }
 
-func (r *Registry) groupForLightLocked(lightID string) (hue.Group, bool) {
+func (r *Registry) groupForLightLocked(lightID string, excluded func(string) bool) (hue.Group, bool) {
+	if excluded == nil {
+		excluded = func(string) bool { return false }
+	}
 	// A light the cache no longer holds belongs to nothing. The zone fallback
 	// below would otherwise still find it: a deleted light stays in its zone's
 	// Children until the zone itself updates, so lightToZones keeps the
@@ -429,16 +438,17 @@ func (r *Registry) groupForLightLocked(lightID string) (hue.Group, bool) {
 	}
 	if l.Owner.RID != "" {
 		if roomID, ok := r.deviceToRoom[l.Owner.RID]; ok {
-			if room, ok := r.rooms[roomID]; ok {
+			if room, ok := r.rooms[roomID]; ok && !excluded(room.ID) {
 				return room, true
 			}
 		}
 	}
-	// Fall back to a zone only when the light is in no room at all.
+	// Fall back to a zone when the light is in no room at all, or when its
+	// room is excluded and so has ceded the light.
 	zoneIDs := append([]string(nil), r.lightToZones[lightID]...)
 	sort.Strings(zoneIDs)
 	for _, id := range zoneIDs {
-		if z, ok := r.zones[id]; ok {
+		if z, ok := r.zones[id]; ok && !excluded(z.ID) {
 			return z, true
 		}
 	}
@@ -449,15 +459,18 @@ func (r *Registry) groupForLightLocked(lightID string) (hue.Group, bool) {
 // group, which makes the group unreachable: nothing the keeper does is ever
 // attributed to it, so excluding it or pinning a scene to it is a no-op.
 //
-// On a real bridge this is the normal state of a zone. Rooms win in
-// GroupForLight and every light is in a room, so a zone is selected only for
-// the lights that somehow have no room at all. The config layer uses this to
-// warn about an exclusion that would otherwise fail in complete silence.
+// On a real bridge this is the normal state of a zone whose rooms are not
+// excluded: rooms win in GroupForLight and every light is in a room, so such a
+// zone is selected only for the lights that somehow have no room at all. An
+// excluded room cedes its lights, though, which is what un-shadows a zone that
+// carves them out. The config layer uses this, with the exclusions it is
+// resolving, to warn about an exclusion that would otherwise fail in complete
+// silence.
 //
 // A group with no lights is not shadowed. Nothing is stealing its lights; it
 // simply has none yet, and warning about an empty room the user is still
 // furnishing would be noise.
-func (r *Registry) GroupShadowed(groupID string) bool {
+func (r *Registry) GroupShadowed(groupID string, excluded func(string) bool) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -466,7 +479,7 @@ func (r *Registry) GroupShadowed(groupID string) bool {
 		return false
 	}
 	for _, id := range lightIDs {
-		if g, ok := r.groupForLightLocked(id); ok && g.ID == groupID {
+		if g, ok := r.groupForLightLocked(id, excluded); ok && g.ID == groupID {
 			return false
 		}
 	}

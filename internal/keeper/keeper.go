@@ -481,6 +481,16 @@ func (k *Keeper) enqueueStartupTriggers() {
 			if excl.LightExcluded(lightID) {
 				continue
 			}
+			// Spend the group's one trigger only on a light this group
+			// actually governs. A zone iterated here mostly holds lights
+			// whose rooms own them; a trigger emitted for one of those would
+			// resolve to the room and leave the zone without its startup
+			// recall - which matters now that an excluded room cedes lights
+			// to a zone, because the zone's iteration is the only one that
+			// will ever see those lights.
+			if g, ok := k.reg.GroupForLight(lightID, excl.GroupExcluded); !ok || g.ID != group.ID {
+				continue
+			}
 			if on, known := k.reg.LightIsOn(lightID); known && on {
 				k.emit(trigger{kind: kindLight, id: lightID, reason: reasonStartup})
 				break
@@ -728,7 +738,7 @@ func (k *Keeper) schedule(pending map[string]*pendingRecall, t trigger) bool {
 		// reports the lights it just turned on, the entry that caused them is
 		// long gone from pending, so there is nothing for the echo to extend
 		// and it cannot conjure a new entry either.
-		group, ok := k.reg.GroupForLight(t.id)
+		group, ok := k.groupForLight(t.id)
 		if !ok {
 			return false
 		}
@@ -951,8 +961,8 @@ func (k *Keeper) queueDeviceLookup(queued map[string]*deviceLookup, t trigger) {
 		if excl.LightExcluded(lightID) {
 			continue
 		}
-		group, ok := k.reg.GroupForLight(lightID)
-		if !ok || excl.GroupExcluded(group.ID) {
+		group, ok := k.reg.GroupForLight(lightID, excl.GroupExcluded)
+		if !ok {
 			continue
 		}
 		item := queued[group.ID]
@@ -1028,6 +1038,18 @@ func (k *Keeper) coalesceWindow() time.Duration {
 	return k.cfg.CoalesceWindow.Duration()
 }
 
+// groupForLight resolves the group governing a light under the current
+// exclusions. Exclusion feeds the resolution rather than vetoing its result:
+// an excluded room cedes its lights to a non-excluded zone that holds them,
+// and a light whose room and zones are all excluded belongs to nothing - so a
+// group this returns is never an excluded one, and no caller needs to check.
+func (k *Keeper) groupForLight(lightID string) (hue.Group, bool) {
+	k.mu.RLock()
+	excl := k.excl
+	k.mu.RUnlock()
+	return k.reg.GroupForLight(lightID, excl.GroupExcluded)
+}
+
 // resolve turns a light trigger into zero or one recall, applying the
 // exclusion rules and the post-recall suppression window.
 func (k *Keeper) resolve(t trigger) (recall, bool) {
@@ -1046,14 +1068,18 @@ func (k *Keeper) resolve(t trigger) (recall, bool) {
 		k.log.Info("ignoring excluded light", "light", lightName, "reason", t.reason)
 		return recall{}, false
 	}
-	group, ok := k.reg.GroupForLight(lightID)
+	group, ok := k.reg.GroupForLight(lightID, excl.GroupExcluded)
 	if !ok {
-		k.log.Warn("light belongs to no room or zone; nothing to recall", "light", lightName)
-		return recall{}, false
-	}
-	if excl.GroupExcluded(group.ID) {
-		k.log.Info("ignoring light in excluded group",
-			"light", lightName, "group", group.Name(), "reason", t.reason)
+		// Two different stories share this branch: a light the bridge holds
+		// no grouping for (worth a warning, something is off), and a light
+		// whose room and zones are all excluded (working exactly as
+		// configured, and possibly on every flip of its switch).
+		if natural, had := k.reg.GroupForLight(lightID, nil); had {
+			k.log.Info("ignoring light, every group it belongs to is excluded",
+				"light", lightName, "group", natural.Name(), "reason", t.reason)
+		} else {
+			k.log.Warn("light belongs to no room or zone; nothing to recall", "light", lightName)
+		}
 		return recall{}, false
 	}
 	// The suppression window: this is almost certainly the echo of our own
@@ -1170,12 +1196,16 @@ func (k *Keeper) commit(p *pendingRecall) bool {
 //
 // The recalled group is not always the only one. The bridge lights every light
 // in the group and reports each as newly on, and those events are resolved back
-// through GroupForLight, which prefers a light's room over any zone it is in.
-// For a room recall that lands on the room itself and the set is a singleton.
-// For a zone recall it does not: a zone only wins for a light that is in no room
-// at all, so a zone mixing such a light with room-owning ones sends its echo
-// into those rooms - where, with no window of their own, every one of them
-// scheduled a recall of its own off the back of ours.
+// through the same exclusion-aware GroupForLight that attributed the trigger,
+// which prefers a light's non-excluded room over any zone it is in. For a room
+// recall that lands on the room itself and the set is a singleton, and so it is
+// for a zone that only carves lights out of excluded rooms. For a mixed zone it
+// is not: the zone wins only for a light in no live room at all, so a zone
+// blending such lights with room-owning ones sends its echo into those rooms -
+// where, with no window of their own, every one of them scheduled a recall of
+// its own off the back of ours. Using the same resolution here is what keeps
+// "armed on every group the echo can be attributed to" true by construction:
+// an excluded group is never armed because no echo can resolve to it.
 //
 // lastRecall is deliberately not touched for the extra groups. It is the floor
 // on how often a room may be restyled, not an echo filter, and a room must not
@@ -1183,7 +1213,7 @@ func (k *Keeper) commit(p *pendingRecall) bool {
 func (k *Keeper) armSuppression(groupID string, until time.Time) []groupSuppression {
 	groups := []string{groupID}
 	for _, lightID := range k.reg.LightIDsInGroup(groupID) {
-		g, ok := k.reg.GroupForLight(lightID)
+		g, ok := k.groupForLight(lightID)
 		if !ok || slices.Contains(groups, g.ID) {
 			continue
 		}
@@ -1350,15 +1380,21 @@ func (k *Keeper) Explain(query string) string {
 		b.WriteString("        (it will still be lit by a recall another light in its room causes)\n")
 		return b.String()
 	}
-	group, ok := k.reg.GroupForLight(match.ID)
+	group, ok := k.reg.GroupForLight(match.ID, excl.GroupExcluded)
+	natural, hasNatural := k.reg.GroupForLight(match.ID, nil)
 	if !ok {
-		b.WriteString("result: SKIPPED - light belongs to no room or zone\n")
+		if hasNatural {
+			fmt.Fprintf(&b, "group:  %s (%s, %s) - excluded\n", natural.Name(), natural.Type, natural.ID)
+			b.WriteString("result: SKIPPED - every group this light belongs to is excluded\n")
+		} else {
+			b.WriteString("result: SKIPPED - light belongs to no room or zone\n")
+		}
 		return b.String()
 	}
 	fmt.Fprintf(&b, "group:  %s (%s, %s)\n", group.Name(), group.Type, group.ID)
-	if excl.GroupExcluded(group.ID) {
-		b.WriteString("result: SKIPPED - group is excluded, it is never recalled\n")
-		return b.String()
+	if hasNatural && natural.ID != group.ID {
+		fmt.Fprintf(&b, "        (%s %q is excluded, so this %s governs the light instead)\n",
+			kindWord(natural), natural.Name(), kindWord(group))
 	}
 	scene, why, ok := k.smartSceneFor(cfg, group)
 	if !ok {
@@ -1395,4 +1431,14 @@ func orUnknown(s string) string {
 		return "unknown"
 	}
 	return s
+}
+
+// kindWord names a group's kind for prose: "room", "zone", or "group" when
+// the bridge reports something newer than this code.
+func kindWord(g hue.Group) string {
+	switch g.Type {
+	case hue.TypeRoom, hue.TypeZone:
+		return g.Type
+	}
+	return "group"
 }

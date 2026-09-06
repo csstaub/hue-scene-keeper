@@ -62,7 +62,7 @@ func seed(t *testing.T) *Registry {
 // light -> owner device -> room, never light -> room directly.
 func TestRoomResolvesThroughDevice(t *testing.T) {
 	r := seed(t)
-	group, ok := r.GroupForLight("light1")
+	group, ok := r.GroupForLight("light1", nil)
 	if !ok {
 		t.Fatal("light1 resolved to no group")
 	}
@@ -87,7 +87,7 @@ func TestZoneChildrenAreLightsDirectly(t *testing.T) {
 		t.Fatalf("zones for light: %v", got)
 	}
 	// The room still wins for scene selection.
-	group, _ := r.GroupForLight("light1")
+	group, _ := r.GroupForLight("light1", nil)
 	if group.ID != "room1" {
 		t.Fatalf("room should win over zone, got %s", group.ID)
 	}
@@ -107,9 +107,65 @@ func TestZoneUsedWhenLightHasNoRoom(t *testing.T) {
 			Children: []hue.ResourceIdentifier{{RID: "orphan", RType: hue.TypeLight}},
 		}),
 	)
-	group, ok := r.GroupForLight("orphan")
+	group, ok := r.GroupForLight("orphan", nil)
 	if !ok || group.ID != "zoneA" {
 		t.Fatalf("expected the zone as fallback, got %+v (ok=%v)", group, ok)
+	}
+}
+
+// TestExcludedRoomCedesLightToZone: exclusion is an input to resolution, not a
+// veto after it. An excluded room hands its lights to the first non-excluded
+// zone holding them, which is what lets a zone carve a light out of a room the
+// daemon otherwise leaves alone.
+func TestExcludedRoomCedesLightToZone(t *testing.T) {
+	r := seed(t)
+	apply(r, "add", raw(t, hue.Group{
+		ID: "zone1", Type: hue.TypeZone,
+		Metadata: &hue.Metadata{Name: "Desk"},
+		Children: []hue.ResourceIdentifier{{RID: "light1", RType: hue.TypeLight}},
+	}))
+
+	excludeRoom := func(id string) bool { return id == "room1" }
+	group, ok := r.GroupForLight("light1", excludeRoom)
+	if !ok || group.ID != "zone1" {
+		t.Fatalf("expected the zone once the room is excluded, got %+v (ok=%v)", group, ok)
+	}
+
+	// With the zone excluded too, the light belongs to nothing.
+	excludeBoth := func(id string) bool { return id == "room1" || id == "zone1" }
+	if group, ok := r.GroupForLight("light1", excludeBoth); ok {
+		t.Fatalf("everything excluded, yet resolved to %s", group.ID)
+	}
+}
+
+// TestExcludedZoneIsSkippedInFallback: the zone loop honours exclusions, and
+// the pick among several zones stays deterministic (sorted by id).
+func TestExcludedZoneIsSkippedInFallback(t *testing.T) {
+	r := New()
+	apply(r, "add",
+		raw(t, hue.Light{
+			ID: "orphan", Type: hue.TypeLight,
+			Owner:    hue.ResourceIdentifier{RID: "devX", RType: hue.TypeDevice},
+			Metadata: &hue.Metadata{Name: "Orphan"},
+		}),
+		raw(t, hue.Group{
+			ID: "zoneA", Type: hue.TypeZone,
+			Metadata: &hue.Metadata{Name: "First"},
+			Children: []hue.ResourceIdentifier{{RID: "orphan", RType: hue.TypeLight}},
+		}),
+		raw(t, hue.Group{
+			ID: "zoneB", Type: hue.TypeZone,
+			Metadata: &hue.Metadata{Name: "Second"},
+			Children: []hue.ResourceIdentifier{{RID: "orphan", RType: hue.TypeLight}},
+		}),
+	)
+
+	if group, ok := r.GroupForLight("orphan", nil); !ok || group.ID != "zoneA" {
+		t.Fatalf("expected zoneA (first by id), got %+v (ok=%v)", group, ok)
+	}
+	excludeA := func(id string) bool { return id == "zoneA" }
+	if group, ok := r.GroupForLight("orphan", excludeA); !ok || group.ID != "zoneB" {
+		t.Fatalf("expected zoneB with zoneA excluded, got %+v (ok=%v)", group, ok)
 	}
 }
 
@@ -224,10 +280,31 @@ func TestGroupShadowed(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := r.GroupShadowed(tt.group); got != tt.want {
+			if got := r.GroupShadowed(tt.group, nil); got != tt.want {
 				t.Errorf("GroupShadowed(%q) = %v, want %v", tt.group, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestGroupShadowedUnderExclusions: an excluded room cedes its lights, which
+// un-shadows a zone carving them out - and judged with its own exclusion
+// peeled off (the config layer's except-self rule), excluding that zone is
+// then meaningful rather than inert.
+func TestGroupShadowedUnderExclusions(t *testing.T) {
+	r := seed(t)
+	apply(r, "add", raw(t, hue.Group{
+		ID: "zone1", Type: hue.TypeZone,
+		Metadata: &hue.Metadata{Name: "Desk"},
+		Children: []hue.ResourceIdentifier{{RID: "light1", RType: hue.TypeLight}},
+	}))
+
+	if !r.GroupShadowed("zone1", nil) {
+		t.Fatal("with the room live, the zone should be shadowed")
+	}
+	excludeRoom := func(id string) bool { return id == "room1" }
+	if r.GroupShadowed("zone1", excludeRoom) {
+		t.Fatal("with the room excluded, the zone should be reachable")
 	}
 }
 
@@ -250,7 +327,7 @@ func TestGroupShadowedNeedsEveryLightCovered(t *testing.T) {
 			},
 		}),
 	)
-	if r.GroupShadowed("mixed") {
+	if r.GroupShadowed("mixed", nil) {
 		t.Error("a zone holding one roomless light is still selectable")
 	}
 }
@@ -269,10 +346,10 @@ func TestDeletedLightResolvesToNoGroup(t *testing.T) {
 	}))
 	apply(r, "delete", json.RawMessage(`{"id":"light1","type":"light"}`))
 
-	if group, ok := r.GroupForLight("light1"); ok {
+	if group, ok := r.GroupForLight("light1", nil); ok {
 		t.Errorf("a deleted light still resolves to %s", group.ID)
 	}
-	if !r.GroupShadowed("zone1") {
+	if !r.GroupShadowed("zone1", nil) {
 		t.Error("a zone whose only light is gone is not reachable; the warning must still fire")
 	}
 }
