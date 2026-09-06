@@ -1206,3 +1206,143 @@ func TestAPanickingWorkerIsLoggedAndStillDies(t *testing.T) {
 		}
 	}
 }
+
+// startStoppableKeeper runs a keeper the way startKeeper does, but hands the
+// stop back instead of only registering it as cleanup, so a test can assert on
+// what shutdown itself did.
+//
+// stop is idempotent: it is both the test's own call and the cleanup.
+func startStoppableKeeper(t *testing.T, b *fake.Bridge, cfg *config.Config) (*registry.Registry, func()) {
+	t.Helper()
+	if cfg == nil {
+		cfg = testConfig()
+	}
+	reg := registry.New()
+	k := New(b.Client(), reg, cfg, testLogger(t), false)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = k.Run(ctx)
+	}()
+	stopped := false
+	stop := func() {
+		t.Helper()
+		if stopped {
+			return
+		}
+		stopped = true
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Error("keeper did not shut down")
+		}
+	}
+	t.Cleanup(stop)
+
+	if !b.WaitForSubscriber(5 * time.Second) {
+		t.Fatal("keeper never connected to the event stream")
+	}
+	waitFor(t, 5*time.Second, "initial sync", func() bool {
+		lights, rooms, _, scenes := reg.Counts()
+		return lights > 0 && rooms > 0 && scenes > 0
+	})
+	return reg, stop
+}
+
+// TestAPendingRecallIsSentAtShutdown: a recall waiting out its coalescing
+// window when the signal arrives has no second chance. The light that caused it
+// is already on, so the next start sees it as it has always been, no off->on
+// edge ever occurs, and the room keeps whatever state something else left it
+// in. A restart in the seconds after somebody walks into a room is exactly that
+// window.
+func TestAPendingRecallIsSentAtShutdown(t *testing.T) {
+	b, lights := kitchenBridge(t)
+	cfg := testConfig()
+	// Long enough that the entry is certainly still waiting when we stop.
+	cfg.CoalesceWindow = config.Duration(2 * time.Second)
+	cfg.CoalesceMax = config.Duration(4 * time.Second)
+	reg, stop := startStoppableKeeper(t, b, cfg)
+
+	b.SwitchLight(lights[0], true)
+	waitFor(t, 5*time.Second, "the switch-on to be seen", func() bool {
+		on, known := reg.LightIsOn(lights[0])
+		return known && on
+	})
+	// The registry is written just before the trigger is queued; this is
+	// dispatch's moment to fold it into pending.
+	time.Sleep(100 * time.Millisecond)
+	if n := len(b.Recalls()); n != 0 {
+		t.Fatalf("the recall should still have been waiting out its window, got %d", n)
+	}
+
+	stop()
+	if n := len(b.Recalls()); n != 1 {
+		t.Fatalf("a recall pending at shutdown must still be sent, got %d", n)
+	}
+}
+
+// TestARecallOnTheWireIsNotCutOffByShutdown: the request is the sender's, and
+// cancelling it with everything else abandoned a recall the bridge had already
+// accepted - the fake stops short of applying one whose caller has gone, just
+// as a real bridge may or may not have started on it.
+func TestARecallOnTheWireIsNotCutOffByShutdown(t *testing.T) {
+	b, lights := kitchenBridge(t)
+	b.DelayRecalls(400 * time.Millisecond)
+	_, stop := startStoppableKeeper(t, b, nil)
+
+	b.SwitchLight(lights[0], true)
+	waitFor(t, 5*time.Second, "the recall to reach the bridge", func() bool {
+		return b.Attempts() > 0
+	})
+
+	stop()
+	if n := len(b.Recalls()); n != 1 {
+		t.Fatalf("a recall already on the wire must be allowed to finish, got %d", n)
+	}
+}
+
+// TestShutdownIsPromptWithNothingToDrain: the grace period is a ceiling for the
+// case that needs it, not a tax on every stop. A daemon that took it every time
+// would turn an ordinary `systemctl restart` into three seconds of nothing,
+// which is how people learn to reach for kill -9.
+func TestShutdownIsPromptWithNothingToDrain(t *testing.T) {
+	b, _ := kitchenBridge(t)
+	_, stop := startStoppableKeeper(t, b, nil)
+
+	start := time.Now()
+	stop()
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("shutdown with nothing pending took %s", took.Round(time.Millisecond))
+	}
+}
+
+// TestRunReturnsWhenTheStreamGivesUp: Stream hands back the errors retrying
+// cannot fix - a revoked application key here - precisely so the service
+// manager sees a failure rather than a process that is alive and doing nothing.
+// Run has to hand them on: waiting on goroutines that watch only the caller's
+// context meant it never returned at all, and the caller never got to
+// rediscover the bridge or report the failure.
+func TestRunReturnsWhenTheStreamGivesUp(t *testing.T) {
+	b, _ := kitchenBridge(t)
+	client := hue.New(hue.Options{
+		BaseURL:           b.URL(),
+		AppKey:            "not-the-key-the-bridge-wants",
+		Insecure:          true,
+		RequestsPerSecond: 10000,
+	})
+	k := New(client, registry.New(), testConfig(), testLogger(t), false)
+
+	done := make(chan error, 1)
+	go func() { done <- k.Run(context.Background()) }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a revoked application key must not look like a clean stop")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run never returned after the stream gave up")
+	}
+}

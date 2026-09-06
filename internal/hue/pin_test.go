@@ -10,6 +10,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"math/big"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -124,6 +126,79 @@ func TestPinLearnsOnlyOnce(t *testing.T) {
 	}
 	if learned != 1 {
 		t.Fatalf("OnLearn should fire once, fired %d times", learned)
+	}
+	if p.Value() != want {
+		t.Fatal("wrong pin stored")
+	}
+}
+
+// TestPinDoesNotHoldItsLockAcrossOnLearn: OnLearn runs from inside the TLS
+// handshake, and it is where the pin is written to disk. Calling it under the
+// same lock Value() takes meant any callback that read its own Pin - to log
+// what it was about to store, or to compare it with what it already had -
+// wedged the handshake goroutine for good.
+func TestPinDoesNotHoldItsLockAcrossOnLearn(t *testing.T) {
+	der, want := selfSigned(t)
+	p := NewPin("")
+	var duringLearn string
+	p.OnLearn = func(string) error {
+		duringLearn = p.Value()
+		return nil
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- p.verify([][]byte{der}, nil) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("verify: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("OnLearn deadlocked against the pin's own lock")
+	}
+	if duringLearn != "" {
+		t.Fatalf("the pin was committed before it was persisted: %q", duringLearn)
+	}
+	if p.Value() != want {
+		t.Fatal("wrong pin stored")
+	}
+}
+
+// TestPinLearnsOnlyOnceUnderConcurrentHandshakes: the value's own mutex is no
+// longer what serialises learning, so the guarantee needs a test that arrives
+// concurrently. Several connections opening at once is the ordinary case - the
+// daemon opens the event stream and its first resource GETs together - and
+// every extra OnLearn is another fsync'd write of the same value.
+func TestPinLearnsOnlyOnceUnderConcurrentHandshakes(t *testing.T) {
+	der, want := selfSigned(t)
+	var learned atomic.Int64
+	p := NewPin("")
+	p.OnLearn = func(string) error {
+		learned.Add(1)
+		// Wide enough that another handshake would be well inside the window
+		// if nothing held it out.
+		time.Sleep(20 * time.Millisecond)
+		return nil
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- p.verify([][]byte{der}, nil)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("verify: %v", err)
+		}
+	}
+	if n := learned.Load(); n != 1 {
+		t.Fatalf("OnLearn should fire once, fired %d times", n)
 	}
 	if p.Value() != want {
 		t.Fatal("wrong pin stored")
