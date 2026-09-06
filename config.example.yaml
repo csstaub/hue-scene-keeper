@@ -1,37 +1,45 @@
 # hue-scene-keeper configuration.
-# Copy to ~/.config/hue-scene-keeper/config.yaml and edit.
-# Every key is optional; the defaults shown here are what you get without a file.
+#
+# Every key is optional and every one is shown here commented out at its
+# default, so this file as it stands changes nothing. Uncomment a line to
+# change it and leave the rest alone: a key you never write keeps whatever the
+# daemon's default is, including after an upgrade that changes that default.
+#
+# A commented line is prefixed `#key:` with no space; ordinary prose keeps the
+# space. To turn a setting on, delete the `#` and the indentation stays right.
+#
+# By hand: copy to ~/.config/hue-scene-keeper/config.yaml and edit.
 
-bridge:
-  # Leave empty to discover the bridge via mDNS, falling back to
-  # discovery.meethue.com. Set it to pin a known address.
-  address: ""
-
-  # Cap on every request to the bridge - recalls, resyncs and power-restore
-  # lookups all share this one budget. Lower it if the bridge starts refusing
-  # requests when a lot of rooms come on at once.
-  requests_per_second: 4
-
-  # How long one request may take. Measured from when the rate limiter releases
-  # it, not from when it was queued, so a deep queue does not eat the budget.
-  request_timeout: 10s
+#bridge:
+#  # Leave empty to discover the bridge via mDNS, falling back to
+#  # discovery.meethue.com. Set it to pin a known address.
+#  address: ""
+#
+#  # Cap on every request to the bridge - recalls, resyncs and power-restore
+#  # lookups all share this one budget. Lower it if the bridge starts refusing
+#  # requests when a lot of rooms come on at once.
+#  requests_per_second: 4
+#
+#  # How long one request may take. Measured from when the rate limiter releases
+#  # it, not from when it was queued, so a deep queue does not eat the budget.
+#  request_timeout: 10s
 
 # The smart scene to recall. The Hue app localises this name, so if your app is
 # not in English, run `hue-scene-keeper list` to see what yours is called.
-scene_name: "Natural Light"
+#scene_name: "Natural Light"
 
 # Recall every room that already has a light on when the daemon starts.
 # Off by default so restarting does not restyle a room you deliberately set.
-apply_on_startup: false
+#apply_on_startup: false
 
 # After recalling a room, ignore triggers from it for this long. A recall turns
 # on every light in the room, and each reports itself as newly on; without this
 # window those echoes would trigger another recall.
-recall_cooldown: 5s
+#recall_cooldown: 5s
 
 # Hard floor between recalls of the same room. Values below 10s are raised to
 # 10s: this is the last defence against a feedback loop hammering the bridge.
-min_recall_interval: 10s
+#min_recall_interval: 10s
 
 # How quiet a room must be before it is recalled. This is an idle gap, not a
 # fixed window: any further activity on the room's lights restarts the wait.
@@ -43,36 +51,36 @@ min_recall_interval: 10s
 # the commands that would otherwise land on top of the scene arrive at lights
 # that are already on, so they carry nothing that would trigger a second recall
 # to put the room right.
-coalesce_window: 300ms
+#coalesce_window: 300ms
 
 # The ceiling on that deferral. A light that chatters - a dynamic scene, a lamp
 # with a failing radio - would otherwise hold its room back indefinitely.
-coalesce_max: 3s
+#coalesce_max: 3s
 
-exclude:
-  # Rooms and zones that are NEVER recalled - a full opt-out.
-  # Accepts names or ids, case-insensitively.
-  #
-  # An excluded room also CEDES its lights to any zone that holds them: those
-  # lights are then governed by the zone and its scene. That is how you manage
-  # part of a room - zone the lights you want styled, give the zone its own
-  # Natural Light scene, and exclude the room; roommates in no zone are left
-  # entirely alone. It also means a room excluded to be left alone must not
-  # overlap a zone you have not also excluded.
-  #
-  # Naming a zone here does nothing while its lights' rooms are live: a light
-  # is recalled as part of its room, and rooms win over zones. The daemon
-  # warns at startup when an entry here cannot take effect.
-  rooms: []
-  #  - "Bedroom"
-  #  - "Nursery"
-
-  # Lights that never TRIGGER a recall. Note the difference: an excluded light
-  # is still turned on by a recall that another light in its room caused. Use
-  # this for a night stand lamp you switch on without wanting to wake the room.
-  lights: []
-  #  - "Night Stand Left"
-  #  - "0a1b2c3d-1234-5678-9abc-def012345678"
+#exclude:
+#  # Rooms and zones that are NEVER recalled - a full opt-out.
+#  # Accepts names or ids, case-insensitively.
+#  #
+#  # An excluded room also CEDES its lights to any zone that holds them: those
+#  # lights are then governed by the zone and its scene. That is how you manage
+#  # part of a room - zone the lights you want styled, give the zone its own
+#  # Natural Light scene, and exclude the room; roommates in no zone are left
+#  # entirely alone. It also means a room excluded to be left alone must not
+#  # overlap a zone you have not also excluded.
+#  #
+#  # Naming a zone here does nothing while its lights' rooms are live: a light
+#  # is recalled as part of its room, and rooms win over zones. The daemon
+#  # warns at startup when an entry here cannot take effect.
+#  rooms:
+#    - "Bedroom"
+#    - "Nursery"
+#
+#  # Lights that never TRIGGER a recall. Note the difference: an excluded light
+#  # is still turned on by a recall that another light in its room caused. Use
+#  # this for a night stand lamp you switch on without wanting to wake the room.
+#  lights:
+#    - "Night Stand Left"
+#    - "0a1b2c3d-1234-5678-9abc-def012345678"
 
 # Pin a specific smart scene to a room, bypassing name matching. Rarely needed.
 # Keys are room or zone names or ids, matched case-insensitively; a key matching
@@ -80,5 +88,5 @@ exclude:
 # the same group twice - once by id, once by name - is warned about too, and the
 # id wins. Two keys differing only in case or surrounding whitespace are a hard
 # config error.
-smart_scene_overrides: {}
+#smart_scene_overrides:
 #  Kitchen: "1f2e3d4c-5b6a-7890-1234-567890abcdef"

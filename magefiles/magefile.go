@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/magefile/mage/mg"
 	"github.com/magefile/mage/sh"
@@ -27,6 +28,15 @@ const (
 	binary  = "hue-scene-keeper"
 	mainPkg = "./cmd/hue-scene-keeper"
 	distDir = "dist"
+
+	// exampleConfig is the commented reference config: the macOS installer
+	// ships it as documentation, and installConfig writes it to the path the
+	// systemd unit reads.
+	exampleConfig = "config.example.yaml"
+	// unitFile is the systemd unit. Its ExecStart is the single source of the
+	// paths a Linux install uses, and installConfig reads one of them back out
+	// of it rather than repeating it here.
+	unitFile = "deploy/hue-scene-keeper.service"
 
 	// bundleID is the launchd label, the pkg identifier, and the receipt name.
 	bundleID = "dev.staub.hue-scene-keeper"
@@ -85,6 +95,122 @@ func Clean() error {
 		}
 	}
 	return nil
+}
+
+// InstallConfig writes the example config to the path the systemd unit passes
+// to --config, stamped with the version and the moment it was installed. It
+// belongs to no toolchain, so it stays at the top level beside Clean.
+//
+// The unit names that file explicitly, and an explicitly-given --config that
+// does not exist is a fatal error by design - it is what catches a typo in a
+// hand-typed path. So a systemd install has to create the file, and this is
+// that step. What it writes selects nothing: the example is entirely comments,
+// so every default stays the daemon's to change, including in a later version.
+//
+// The destination is read back out of the unit rather than written here a
+// second time, so the two cannot drift - which is the bug this target exists
+// to close. An existing file is left exactly as it is: it is the operator's,
+// and an upgrade must never rewrite it.
+//
+// Run it as yourself and not under sudo, for the same reason as go:install:
+// mage compiles this file, and `sudo -E` preserving HOME leaves root-owned
+// entries in your build cache that every later build of yours then fails on.
+// Only the two install calls are elevated.
+func InstallConfig() error {
+	if runtime.GOOS != "linux" {
+		return fmt.Errorf("installConfig writes the config file the systemd unit reads; this is %s", runtime.GOOS)
+	}
+	dest, err := unitConfigPath()
+	if err != nil {
+		return err
+	}
+	return installConfigTo(dest)
+}
+
+// installConfigTo is the whole of InstallConfig bar the platform check and
+// working out where the file goes. It is split off so the writing half can be
+// run against a temporary destination on a machine that is not the target one.
+func installConfigTo(dest string) error {
+	switch _, err := os.Stat(dest); {
+	case err == nil:
+		fmt.Printf("%s is already there, left unchanged\n", dest)
+		return nil
+	case !os.IsNotExist(err):
+		return err
+	}
+
+	body, err := stampedExample(version(), time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp("", "hue-scene-keeper-*.yaml")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(body); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+
+	// Guarded rather than unconditional: `install -d` on a directory that
+	// already exists rewrites its mode, and systemd's own ConfigurationDirectory
+	// may have made this one already.
+	dir := filepath.Dir(dest)
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		if err := elevated("install", "-d", "-m0755", dir); err != nil {
+			return err
+		}
+	}
+	if err := elevated("install", "-m0644", tmp.Name(), dest); err != nil {
+		return err
+	}
+	fmt.Printf("wrote %s - every key commented out, so it is the defaults\n", dest)
+	return nil
+}
+
+// configFlag matches the unit's `--config <path>`, in either the spaced or the
+// = form systemd accepts.
+var configFlag = regexp.MustCompile(`--config[=\s]+(\S+)`)
+
+// unitConfigPath reads the --config path out of the unit's ExecStart. Comment
+// lines are dropped first: the unit's header documents the install, so a
+// --config in the prose would otherwise be found before the real one.
+func unitConfigPath() (string, error) {
+	raw, err := os.ReadFile(unitFile)
+	if err != nil {
+		return "", err
+	}
+	var settings []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), "#") {
+			settings = append(settings, line)
+		}
+	}
+	m := configFlag.FindStringSubmatch(strings.Join(settings, "\n"))
+	if m == nil {
+		return "", fmt.Errorf("%s: no --config path in ExecStart", unitFile)
+	}
+	return m[1], nil
+}
+
+// stampedExample returns the example config with two lines of provenance on
+// top: which version wrote it and when. The file is the operator's from then
+// on, and nothing this project ships ever reads the stamp back - it is there
+// for the person who opens the file in two years and wants to know where it
+// came from and how old its comments are.
+func stampedExample(version string, at time.Time) ([]byte, error) {
+	raw, err := os.ReadFile(exampleConfig)
+	if err != nil {
+		return nil, err
+	}
+	header := fmt.Sprintf("# Installed by hue-scene-keeper %s on %s.\n"+
+		"# Written once; no upgrade rewrites it. Edit it freely.\n\n",
+		version, at.Format(time.RFC3339))
+	return append([]byte(header), raw...), nil
 }
 
 // --- go: the Go toolchain --------------------------------------------------
@@ -249,7 +375,7 @@ func (Pkg) Build() error {
 	if err := os.Chmod(filepath.Join(scripts, binary), 0o755); err != nil {
 		return err
 	}
-	if err := copyFile("config.example.yaml", filepath.Join(scripts, "config.example.yaml"), 0o644); err != nil {
+	if err := copyFile(exampleConfig, filepath.Join(scripts, exampleConfig), 0o644); err != nil {
 		return err
 	}
 	for _, name := range []string{"preinstall", "postinstall"} {

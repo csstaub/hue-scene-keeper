@@ -4,9 +4,9 @@
 # elevates only the copy into /usr/local/bin, whereas sudo would re-run the
 # compiler as root and leave root-owned entries in your Go caches):
 #   go tool mage go:install
+#   go tool mage installConfig
 #   sudo useradd --system --home-dir /var/lib/hue-scene-keeper --shell /usr/sbin/nologin hue
 #   sudo install -d -o hue -g hue -m0700 /var/lib/hue-scene-keeper
-#   sudo install -d -m0755 /etc/hue-scene-keeper
 #   sudo install -m0644 deploy/hue-scene-keeper.service /etc/systemd/system/
 #
 # Pair BEFORE starting the service, as the service user and with the same
@@ -28,6 +28,15 @@
 # once the credentials exist, until the counter is cleared:
 #   sudo systemctl reset-failed hue-scene-keeper
 #   sudo systemctl start hue-scene-keeper
+#
+# The config file is the other way into that state, which is why installConfig
+# is in the list above. Run by hand the daemon needs no config file at all, but
+# this unit *names* one, and an explicitly-given --config that does not exist is
+# a fatal error rather than a fallback to the defaults - it is what catches a
+# typo in a hand-typed path. What installConfig writes is entirely comments, so
+# it selects nothing and every default stays the daemon's, but the file has to
+# be there. Deleting it later fails the unit exactly as missing credentials do,
+# with the same cure.
 
 [Unit]
 Description=Keep Philips Hue rooms in their all-day smart scene

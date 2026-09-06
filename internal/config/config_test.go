@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -826,6 +827,44 @@ func TestCleanAddressAcceptsItsOwnOutput(t *testing.T) {
 		}
 		if twice != once {
 			t.Errorf("CleanAddress is not idempotent for %q: %q then %q", in, once, twice)
+		}
+	}
+}
+
+// TestExampleConfigSelectsNothing pins the example file's whole purpose: it is
+// a commented reference, and installing it is meant to change nothing.
+//
+// The systemd unit passes --config explicitly, and an explicit path that does
+// not exist is fatal, so a Linux install has to put a file there (`go tool
+// mage installConfig`). That file is this one. If a value in it were ever left
+// uncommented it would freeze that setting at whatever this version's default
+// happened to be, and a later release changing the default would silently not
+// reach anyone who installed before it - the failure this test exists to
+// catch, since nothing else would report it.
+//
+// The stamped copy is what installConfig actually writes: the same bytes under
+// two lines of provenance. Those live in the magefile, which carries the mage
+// build tag and so cannot be tested directly; prepending an equivalent header
+// here covers the only thing about them that could break parsing.
+func TestExampleConfigSelectsNothing(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "config.example.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stamp := []byte("# Installed by hue-scene-keeper v1.2.3 on 2026-01-02T03:04:05Z.\n" +
+		"# Written once; no upgrade rewrites it. Edit it freely.\n\n")
+
+	for name, body := range map[string][]byte{
+		"as shipped":                 raw,
+		"as installConfig writes it": append(stamp, raw...),
+	} {
+		cfg, err := Load(writeConfig(t, string(body)))
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		if !reflect.DeepEqual(cfg, Default()) {
+			t.Errorf("%s: the example config is not the defaults:\n got %+v\nwant %+v", name, cfg, Default())
 		}
 	}
 }

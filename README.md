@@ -77,7 +77,14 @@ create one in the Hue app. The daemon will not invent a substitute.
 ## Configuration
 
 Optional. Copy [`config.example.yaml`](config.example.yaml) to
-`~/.config/hue-scene-keeper/config.yaml`. The defaults work without a file.
+`~/.config/hue-scene-keeper/config.yaml`. The defaults work without a file, and
+the example ships with every key commented out at its default, so uncomment only
+what you want to change — a key you never write keeps following the daemon's
+default, including after an upgrade that moves it.
+
+One exception to "without a file": the systemd unit names its config path
+explicitly, so a Linux service install does need the file to exist. `go tool
+mage installConfig` creates it; see [Running as a service](#running-as-a-service).
 
 ```yaml
 scene_name: "Natural Light"     # localised by the Hue app; `list` shows yours
@@ -142,9 +149,9 @@ with the same `--state` path the unit uses — the unit passes its paths explici
 so that these two cannot drift apart:
 
 ```sh
+go tool mage installConfig    # writes /etc/hue-scene-keeper/config.yaml
 sudo useradd --system --home-dir /var/lib/hue-scene-keeper --shell /usr/sbin/nologin hue
 sudo install -d -o hue -g hue -m0700 /var/lib/hue-scene-keeper
-sudo install -d -m0755 /etc/hue-scene-keeper
 sudo install -m0644 deploy/hue-scene-keeper.service /etc/systemd/system/
 
 sudo -u hue /usr/local/bin/hue-scene-keeper \
@@ -154,6 +161,18 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now hue-scene-keeper
 journalctl -u hue-scene-keeper -f
 ```
+
+`installConfig` is not optional here, and it is the one step whose absence is
+not obvious. The unit passes `--config /etc/hue-scene-keeper/config.yaml`, and a
+`--config` you give explicitly must exist — pointing it at a missing file is an
+error rather than a quiet fall back to the defaults, which is what catches a
+typo in a path you typed yourself. So the file has to be there even though its
+contents are optional. The file it writes is entirely comments: it
+selects nothing, every default stays the daemon's to change in a later version,
+and it carries the version and date it was installed at the top. It never
+overwrites a file that already exists, so it is safe to re-run on an upgrade.
+Delete that file later and the unit fails at startup the same way it does with
+no credentials, cured the same way (`systemctl reset-failed`, below).
 
 **macOS (launchd)** — `go tool mage pkg:build` does all of this for you; do it by hand
 only if you would rather not install a package:
